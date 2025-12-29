@@ -1,0 +1,66 @@
+using System;
+using System.Collections.Generic;
+
+namespace SalesforceAPI.Models
+{
+    // Request Model
+    public class TransactionHistoryRequest
+    {
+        public string PolicyID { get; set; } = string.Empty;
+    }
+
+    // Pagination Request
+    public class TransactionHistoryPagedRequest : TransactionHistoryRequest
+    {
+        public int PageNumber { get; set; } = 1;
+        public int PageSize { get; set; } = 10;
+    }
+
+    // Response Model
+    public class TransactionHistoryResponse
+    {
+        public List<WithdrawalSummary>? WithdrawalSummary { get; set; }
+        public List<Switching>? SwitchingTransactions { get; set; }
+        public List<DetailSwitching>? DetailSwitching { get; set; }
+    }
+
+    // Paginated Response
+    public class PagedResponse<T>
+    {
+        public T? Data { get; set; }
+        public int PageNumber { get; set; }
+        public int PageSize { get; set; }
+        public int TotalRecords { get; set; }
+        public int TotalPages { get; set; }
+        public bool HasPreviousPage => PageNumber > 1;
+        public bool HasNextPage => PageNumber < TotalPages;
+    }
+
+    // Withdrawal Summary
+    public class WithdrawalSummary
+    {
+        public string PolicyID { get; set; } = string.Empty;
+        public decimal TotalWithdrawalAmount { get; set; }
+        public DateTime? WithdrawalEffectiveDate { get; set; }
+        public decimal TotalAmount { get; set; }
+    }
+
+    // Switching
+    public class Switching
+    {
+        public DateTime? ActivityEffectiveDate { get; set; }
+        public string ActivityType { get; set; } = string.Empty;
+        public decimal NetAmount { get; set; }
+        public DateTime? EffectiveDateOfReversal { get; set; }
+    }
+
+    // Detail Switching
+    public class DetailSwitching
+    {
+        public string Fund { get; set; } = string.Empty;
+        public decimal UnitPrice { get; set; }
+        public decimal NetUnitChange { get; set; }
+        public int ApproximateNumberOfUnits { get; set; }
+        public decimal FundAccumulationUnit { get; set; }
+    }
+}

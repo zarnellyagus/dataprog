@@ -1,0 +1,192 @@
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
+using SalesforceAPI.Interfaces;
+using SalesforceAPI.Models;
+
+namespace SalesforceAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class TransactionHistoryController : ControllerBase
+    {
+        private readonly ITransactionHistoryRepository _repository;
+        private readonly ILogger<TransactionHistoryController> _logger;
+
+        public TransactionHistoryController(
+            ITransactionHistoryRepository repository,
+            ILogger<TransactionHistoryController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        /// <summary>
+        /// Get Transaction History dengan Pagination
+        /// Route: POST api/TransactionHistory/{policyId}/{pageNumber}
+        /// Setiap halaman berisi 10 record
+        /// </summary>
+        /// <param name="policyId">Policy ID dari route parameter</param>
+        /// <param name="pageNumber">Nomor halaman (mulai dari 1)</param>
+        /// <returns>Data transaksi dengan 10 record per halaman</returns>
+        [HttpPost("{policyId}/{pageNumber}")]
+        [ProducesResponseType(typeof(PagedResponse<TransactionHistoryResponse>), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetPagedData(
+            [FromRoute] string policyId,
+            [FromRoute] int pageNumber)
+        {
+            try
+            {
+                // Validasi PolicyID
+                if (string.IsNullOrWhiteSpace(policyId))
+                {
+                    _logger.LogWarning("GetPagedData called with empty policyId");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "PolicyID tidak boleh kosong"
+                    });
+                }
+
+                // Validasi Page Number
+                if (pageNumber < 1)
+                {
+                    _logger.LogWarning($"Invalid page number: {pageNumber} for PolicyID: {policyId}");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Nomor halaman harus lebih besar dari 0"
+                    });
+                }
+
+                _logger.LogInformation($"Mengambil data halaman {pageNumber} untuk PolicyID: {policyId} (10 record per halaman)");
+
+                // Panggil repository dengan pageSize tetap 10
+                var result = await _repository.GetTransactionHistoryPagedAsync(policyId, pageNumber, 10);
+
+                // Validasi hasil
+                if (result == null || result.Data == null)
+                {
+                    _logger.LogWarning($"Tidak ada data ditemukan untuk PolicyID: {policyId}");
+                    return NotFound(new
+                    {
+                        success = false,
+                        message = $"Tidak ada data transaksi untuk PolicyID: {policyId}"
+                    });
+                }
+
+                // Cek jika halaman melebihi total halaman
+                if (pageNumber > result.TotalPages && result.TotalPages > 0)
+                {
+                    _logger.LogWarning($"Halaman {pageNumber} melebihi total halaman {result.TotalPages} untuk PolicyID: {policyId}");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = $"Halaman {pageNumber} tidak tersedia. Total halaman: {result.TotalPages}"
+                    });
+                }
+
+                _logger.LogInformation(
+                    $"Berhasil mengambil halaman {pageNumber} untuk PolicyID: {policyId} - " +
+                    $"Switching: {result.Data.SwitchingTransactions?.Count ?? 0} record, " +
+                    $"Detail: {result.Data.DetailSwitching?.Count ?? 0} record"
+                );
+
+                // Return success response
+                return Ok(new
+                {
+                    success = true,
+                    message = "Data transaksi berhasil diambil",
+                    info = new
+                    {
+                        policyId = policyId,
+                        currentPage = result.PageNumber,
+                        recordsPerPage = result.PageSize,
+                        totalRecords = result.TotalRecords,
+                        totalPages = result.TotalPages,
+                        hasPreviousPage = result.HasPreviousPage,
+                        hasNextPage = result.HasNextPage,
+                        previousPage = result.HasPreviousPage ? $"/api/TransactionHistory/{policyId}/{result.PageNumber - 1}" : null,
+                        nextPage = result.HasNextPage ? $"/api/TransactionHistory/{policyId}/{result.PageNumber + 1}" : null
+                    },
+                    data = result.Data
+                });
+            }
+            catch (SqlException ex)
+            {
+                _logger.LogError(ex, $"Database error untuk PolicyID: {policyId}, Page: {pageNumber}");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Terjadi kesalahan database",
+                    errorCode = ex.Number,
+                    error = ex.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error untuk PolicyID: {policyId}, Page: {pageNumber}");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Terjadi kesalahan pada server",
+                    error = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
+        /// Get semua Transaction History tanpa pagination (Original method)
+        /// </summary>
+        [HttpPost]
+        [ProducesResponseType(typeof(TransactionHistoryResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> Post([FromBody] TransactionHistoryRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.PolicyID))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "PolicyID tidak boleh kosong"
+                    });
+                }
+
+                _logger.LogInformation($"Mengambil semua data untuk PolicyID: {request.PolicyID}");
+
+                var result = await _repository.GetTransactionHistoryAsync(request.PolicyID);
+
+                if (result == null)
+                {
+                    return NotFound(new
+                    {
+                        success = false,
+                        message = $"Tidak ada data untuk PolicyID: {request.PolicyID}"
+                    });
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "Data berhasil diambil",
+                    data = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error untuk PolicyID: {request?.PolicyID}");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Terjadi kesalahan pada server"
+                });
+            }
+        }
+    }
+}

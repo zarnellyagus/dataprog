@@ -1,0 +1,192 @@
+using Dapper;
+using Microsoft.Data.SqlClient;
+using SalesforceAPI.Interfaces;
+using SalesforceAPI.Models;
+
+namespace SalesforceAPI.Repositories
+{
+    public class TransactionHistoryRepository : ITransactionHistoryRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<TransactionHistoryRepository> _logger;
+
+        public TransactionHistoryRepository(
+            IConfiguration configuration,
+            ILogger<TransactionHistoryRepository> logger)
+        {
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                ?? throw new ArgumentNullException("Connection string NDIBOARD33 not found");
+            _logger = logger;
+        }
+
+        public async Task<TransactionHistoryResponse> GetTransactionHistoryAsync(string policyId)
+        {
+            try
+            {
+                using (var connection = new SqlConnection(_connectionString))
+                {
+                    await connection.OpenAsync();
+                    
+                    var sql = @"
+                    -- Withdrawal Summary
+                    SELECT DISTINCT 
+                        CIA.CIA_FND_TRXN_AMT as TotalWithdrawalAmount, 
+                        NULL AS WithdrawalEffectiveDate,
+                        0 AS TotalAmount
+                    FROM DWM_POLICY PL 
+                    LEFT JOIN DWT_CIA CIA ON CIA.POL_ID=PL.POL_ID
+                    WHERE PL.pol_id=@PolicyID;
+
+                    -- Switching Transactions
+                    SELECT DISTINCT 
+                        CIA.CIA_EFF_DT as ActivityEffectiveDate,
+                        CIA.CIA_TYP_CD AS ActivityType,
+                        CIA.CIA_FND_TRXN_AMT AS NetAmount,
+                        CIA.CIA_REVRS_PRCES_DT AS EffectiveDateOfReversal
+                    FROM DWT_CIA CIA 
+                    WHERE CIA.POL_ID=@PolicyID;
+
+                    -- Detail Switching
+                    SELECT 
+                        FA.FND_ID AS Fund, 
+                        FP.PURCH_PRIC_AMT AS UnitPrice,
+                        FA.FIA_INTG_AUNIT_QTY AS NetUnitChange,
+                        FA.CFN_INTG_AUNIT_QTY AS ApproximateNumberOfUnits,
+                        0 AS FundAccumulationUnit
+                    FROM DWT_FIA FA
+                    INNER JOIN DWT_FUND_UNIT_PRICE FP 
+                        ON FP.FND_ID=FA.FND_ID AND FA.FIA_EFF_DT=FP.FNDVL_EFF_DT
+                    WHERE FA.POL_ID=@PolicyID 
+                    ORDER BY FA.fia_eff_dt DESC;
+                    ";
+
+                    using (var multi = await connection.QueryMultipleAsync(sql, new { PolicyID = policyId }))
+                    {
+                        var response = new TransactionHistoryResponse
+                        {
+                            WithdrawalSummary = (await multi.ReadAsync<WithdrawalSummary>()).ToList(),
+                            SwitchingTransactions = (await multi.ReadAsync<Switching>()).ToList(),
+                            DetailSwitching = (await multi.ReadAsync<DetailSwitching>()).ToList()
+                        };
+
+                        return response;
+                    }
+                }
+            }
+            catch (SqlException ex)
+            {
+                _logger.LogError(ex, $"SQL Error in GetTransactionHistoryAsync for PolicyId: {policyId}");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error in GetTransactionHistoryAsync for PolicyId: {policyId}");
+                throw;
+            }
+        }
+
+        public async Task<PagedResponse<TransactionHistoryResponse>> GetTransactionHistoryPagedAsync(
+            string policyId, 
+            int pageNumber, 
+            int pageSize = 10)
+        {
+            try
+            {
+                using (var connection = new SqlConnection(_connectionString))
+                {
+                    await connection.OpenAsync();
+                    
+                    int offset = (pageNumber - 1) * pageSize;
+                    
+                    var sql = @"
+                    -- Withdrawal Summary (tidak di-page karena biasanya 1 record)
+                    SELECT DISTINCT 
+                        CIA.CIA_FND_TRXN_AMT as TotalWithdrawalAmount, 
+                        NULL AS WithdrawalEffectiveDate,
+                        0 AS TotalAmount
+                    FROM DWM_POLICY PL WITH (NOLOCK)
+                    LEFT JOIN DWT_CIA CIA WITH (NOLOCK) ON CIA.POL_ID = PL.POL_ID
+                    WHERE PL.pol_id = @PolicyID;
+
+                    -- Switching Transactions dengan Pagination (10 records)
+                    SELECT DISTINCT 
+                        CIA.CIA_EFF_DT as ActivityEffectiveDate,
+                        CIA.CIA_TYP_CD AS ActivityType,
+                        CIA.CIA_FND_TRXN_AMT AS NetAmount,
+                        CIA.CIA_REVRS_PRCES_DT AS EffectiveDateOfReversal
+                    FROM DWT_CIA CIA WITH (NOLOCK)
+                    WHERE CIA.POL_ID = @PolicyID
+                    ORDER BY CIA.CIA_EFF_DT DESC
+                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
+
+                    -- Total count Switching
+                    SELECT COUNT(*) 
+                    FROM DWT_CIA CIA WITH (NOLOCK)
+                    WHERE CIA.POL_ID = @PolicyID;
+
+                    -- Detail Switching dengan Pagination (10 records)
+                    SELECT 
+                        FA.FND_ID AS Fund, 
+                        FP.PURCH_PRIC_AMT AS UnitPrice,
+                        FA.FIA_INTG_AUNIT_QTY AS NetUnitChange,
+                        FA.CFN_INTG_AUNIT_QTY AS ApproximateNumberOfUnits,
+                        0 AS FundAccumulationUnit
+                    FROM DWT_FIA FA WITH (NOLOCK)
+                    INNER JOIN DWT_FUND_UNIT_PRICE FP WITH (NOLOCK)
+                        ON FP.FND_ID = FA.FND_ID AND FA.FIA_EFF_DT = FP.FNDVL_EFF_DT
+                    WHERE FA.POL_ID = @PolicyID
+                    ORDER BY FA.FIA_EFF_DT DESC
+                    OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
+
+                    -- Total count Detail Switching
+                    SELECT COUNT(*) 
+                    FROM DWT_FIA FA WITH (NOLOCK)
+                    WHERE FA.POL_ID = @PolicyID;
+                    ";
+
+                    using (var multi = await connection.QueryMultipleAsync(sql, new { 
+                        PolicyID = policyId,
+                        Offset = offset,
+                        PageSize = pageSize
+                    }))
+                    {
+                        var withdrawalSummary = (await multi.ReadAsync<WithdrawalSummary>()).ToList();
+                        var switchingTransactions = (await multi.ReadAsync<Switching>()).ToList();
+                        var switchingCount = await multi.ReadSingleAsync<int>();
+                        var detailSwitching = (await multi.ReadAsync<DetailSwitching>()).ToList();
+                        var detailCount = await multi.ReadSingleAsync<int>();
+
+                        var response = new TransactionHistoryResponse
+                        {
+                            WithdrawalSummary = withdrawalSummary,
+                            SwitchingTransactions = switchingTransactions,
+                            DetailSwitching = detailSwitching
+                        };
+
+                        int totalRecords = Math.Max(switchingCount, detailCount);
+                        int totalPages = (int)Math.Ceiling(totalRecords / (double)pageSize);
+
+                        return new PagedResponse<TransactionHistoryResponse>
+                        {
+                            Data = response,
+                            PageNumber = pageNumber,
+                            PageSize = pageSize,
+                            TotalRecords = totalRecords,
+                            TotalPages = totalPages
+                        };
+                    }
+                }
+            }
+            catch (SqlException ex)
+            {
+                _logger.LogError(ex, $"SQL Error in GetTransactionHistoryPagedAsync for PolicyId: {policyId}");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error in GetTransactionHistoryPagedAsync for PolicyId: {policyId}");
+                throw;
+            }
+        }
+    }
+}
