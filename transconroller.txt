@@ -1,0 +1,221 @@
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
+using SalesforceAPI.Interfaces;
+using SalesforceAPI.Models;
+
+namespace SalesforceAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class TransactionHistoryController : ControllerBase
+    {
+        private readonly ITransactionHistoryRepository _repository;
+        private readonly ILogger<TransactionHistoryController> _logger;
+
+        public TransactionHistoryController(
+            ITransactionHistoryRepository repository,
+            ILogger<TransactionHistoryController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        /// <summary>
+        /// Get Transaction History by PolicyID and Page Number
+        /// Route: POST api/TransactionHistory/ABC123/1
+        /// Default: 10 rows per page
+        /// </summary>
+        /// <param name="policyId">Policy ID from route</param>
+        /// <param name="pageNumber">Page number from route</param>
+        /// <param name="pageSize">Optional page size from query (default: 10)</param>
+        [HttpPost("{policyId}/{pageNumber}")]
+        [ProducesResponseType(typeof(PagedResponse<TransactionHistoryResponse>), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetByPolicyAndPage(
+            [FromRoute] string policyId,
+            [FromRoute] int pageNumber,
+            [FromQuery] int pageSize = 10)
+        {
+            try
+            {
+                // Validate policyId
+                if (string.IsNullOrWhiteSpace(policyId))
+                {
+                    _logger.LogWarning("GetByPolicyAndPage called with empty policyId");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "PolicyID is required and cannot be empty"
+                    });
+                }
+
+                // Validate pageNumber
+                if (pageNumber < 1)
+                {
+                    _logger.LogWarning($"Invalid page number: {pageNumber}");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Page number must be greater than 0"
+                    });
+                }
+
+                // Validate pageSize
+                if (pageSize < 1 || pageSize > 100)
+                {
+                    _logger.LogWarning($"Invalid page size: {pageSize}");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Page size must be between 1 and 100"
+                    });
+                }
+
+                _logger.LogInformation($"Fetching transaction history - PolicyID: {policyId}, Page: {pageNumber}, PageSize: {pageSize}");
+
+                // Call repository
+                var result = await _repository.GetTransactionHistoryPagedAsync(
+                    policyId,
+                    pageNumber,
+                    pageSize
+                );
+
+                // Check if data exists
+                if (result == null || result.Data == null)
+                {
+                    _logger.LogWarning($"No transaction history found for PolicyID: {policyId}");
+                    return NotFound(new
+                    {
+                        success = false,
+                        message = $"No transaction history found for PolicyID: {policyId}"
+                    });
+                }
+
+                // Check if page number exceeds total pages
+                if (pageNumber > result.TotalPages && result.TotalPages > 0)
+                {
+                    _logger.LogWarning($"Page {pageNumber} exceeds total pages {result.TotalPages} for PolicyID: {policyId}");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = $"Page {pageNumber} exceeds total pages ({result.TotalPages})"
+                    });
+                }
+
+                _logger.LogInformation(
+                    $"Successfully retrieved page {pageNumber} for PolicyID: {policyId} - " +
+                    $"Total Records: {result.TotalRecords}, Total Pages: {result.TotalPages}"
+                );
+
+                // Return success response
+                return Ok(new
+                {
+                    success = true,
+                    message = "Transaction history retrieved successfully",
+                    pagination = new
+                    {
+                        currentPage = result.PageNumber,
+                        pageSize = result.PageSize,
+                        totalRecords = result.TotalRecords,
+                        totalPages = result.TotalPages,
+                        hasPreviousPage = result.HasPreviousPage,
+                        hasNextPage = result.HasNextPage,
+                        previousPage = result.HasPreviousPage ? result.PageNumber - 1 : (int?)null,
+                        nextPage = result.HasNextPage ? result.PageNumber + 1 : (int?)null
+                    },
+                    data = result.Data
+                });
+            }
+            catch (SqlException ex)
+            {
+                _logger.LogError(ex, $"Database error while fetching transaction history for PolicyID: {policyId}");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Database error occurred while processing your request",
+                    errorCode = ex.Number,
+                    error = ex.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Unexpected error while fetching transaction history for PolicyID: {policyId}");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "An error occurred while processing your request",
+                    error = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
+        /// Get Transaction History - Original endpoint (without pagination)
+        /// </summary>
+        [HttpPost]
+        [ProducesResponseType(typeof(TransactionHistoryResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> Post([FromBody] TransactionHistoryRequest request)
+        {
+            try
+            {
+                if (request == null || string.IsNullOrWhiteSpace(request.PolicyID))
+                {
+                    _logger.LogWarning("TransactionHistory POST called with invalid PolicyID");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "PolicyID is required and cannot be empty"
+                    });
+                }
+
+                _logger.LogInformation($"Fetching all transaction history for PolicyID: {request.PolicyID}");
+
+                var result = await _repository.GetTransactionHistoryAsync(request.PolicyID);
+
+                if (result == null ||
+                    (result.WithdrawalSummary == null &&
+                     (result.SwitchingTransactions == null || result.SwitchingTransactions.Count == 0) &&
+                     (result.DetailSwitching == null || result.DetailSwitching.Count == 0)))
+                {
+                    _logger.LogWarning($"No transaction history found for PolicyID: {request.PolicyID}");
+                    return NotFound(new
+                    {
+                        success = false,
+                        message = $"No transaction history found for PolicyID: {request.PolicyID}"
+                    });
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "Transaction history retrieved successfully",
+                    data = result
+                });
+            }
+            catch (SqlException ex)
+            {
+                _logger.LogError(ex, $"Database error for PolicyID: {request?.PolicyID}");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Database error occurred",
+                    errorCode = ex.Number
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error for PolicyID: {request?.PolicyID}");
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "An error occurred while processing your request"
+                });
+            }
+        }
+    }
+}
