@@ -1,0 +1,96 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "Policy Details API",
+    "description": "API for retrieving policy and beneficiary details",
+    "version": "v1"
+  },
+  "paths": {
+    "/api/AnticipatedEndowment": {
+      "post": {
+        "tags": [
+          "AnticipatedEndowment"
+        ],
+        "security": [
+          {
+            "uat-api-scope": [
+              "asiaapiplatform.id.ext-api-cimb.inquiry.r"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnticipatedEndowmentRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnticipatedEndowmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnticipatedEndowmentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnticipatedEndowmentRequest": {
+        "type": "object",
+        "required": [
+          "policyNumber"
+        ],
+        "properties": {
+          "policyNumber": {
+            "type": "string"
+          }
+        }
+      },
+      "AnticipatedEndowmentResponse": {
+        "type": "object",
+        "properties": {
+          "policyNumber": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "uat-api-scope": {
+        "type": "oauth2",
+        "flows": {
+          "clientCredentials": {
+            "tokenUrl": "https://auth.example.com/oauth2/token",
+            "scopes": {
+              "asiaapiplatform.id.ext-api-cimb.inquiry.r": "Read access for CIMB inquiry"
+            }
+          }
+        }
+      }
+    }
+  }
+}
