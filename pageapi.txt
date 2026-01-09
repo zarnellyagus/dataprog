@@ -1,0 +1,190 @@
+using System;
+using System.Collections.Generic;
+
+namespace SalesforceAPI.Models
+{
+    // Request Model
+    public class TransactionHistoryRequest
+    {
+        public string PolicyID { get; set; } = string.Empty;
+    }
+
+    // Pagination Request (Default pageSize = 10)
+    public class TransactionHistoryPagedRequest : TransactionHistoryRequest
+    {
+        public int PageNumber { get; set; } = 1;
+        public int PageSize { get; set; } = 10;
+    }
+
+    // Response Model
+    public class TransactionHistoryResponse
+    {
+        public List<WithdrawalSummary> WithdrawalSummary { get; set; } = new();
+        public List<Switching> SwitchingTransactions { get; set; } = new();
+        public List<DetailSwitching> DetailSwitching { get; set; } = new();
+    }
+
+    // Paginated Response
+    public class PagedResponse<T>
+    {
+        public T Data { get; set; } = default!;
+        public int PageNumber { get; set; }
+        public int PageSize { get; set; }
+        public int TotalRecords { get; set; }
+        public int TotalPages { get; set; }
+        public bool HasPreviousPage => PageNumber > 1;
+        public bool HasNextPage => PageNumber < TotalPages;
+    }
+
+    public class WithdrawalSummary
+    {
+        public string PolicyID { get; set; } = string.Empty;
+        public decimal TotalWithdrawalAmount { get; set; }
+        public DateTime? WithdrawalEffectiveDate { get; set; }
+        public decimal TotalAmount { get; set; }
+    }
+
+    public class Switching
+    {
+        public DateTime? ActivityEffectiveDate { get; set; }
+        public string ActivityType { get; set; } = string.Empty;
+        public decimal NetAmount { get; set; }
+        public DateTime? EffectiveDateOfReversal { get; set; }
+    }
+
+    public class DetailSwitching
+    {
+        public string Fund { get; set; } = string.Empty;
+        public decimal UnitPrice { get; set; }
+        public decimal NetUnitChange { get; set; }
+        public int ApproximateNumberOfUnits { get; set; }
+        public decimal FundAccumulationUnit { get; set; }
+    }
+}
+
+
+2. Interface (Interfaces/ITransactionHistoryRepository.cs)
+using SalesforceAPI.Models;
+
+namespace SalesforceAPI.Interfaces
+{
+    public interface ITransactionHistoryRepository
+    {
+        Task<PagedResponse<TransactionHistoryResponse>> GetTransactionHistoryPagedAsync(
+            TransactionHistoryPagedRequest request);
+    }
+}
+
+3. Repository Lengkap (Repositories/TransactionHistoryRepository.cs)
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
+using SalesforceAPI.Data; // YourDbContext
+using SalesforceAPI.Interfaces;
+using SalesforceAPI.Models;
+
+namespace SalesforceAPI.Repositories
+{
+    public class TransactionHistoryRepository : ITransactionHistoryRepository
+    {
+        private readonly YourDbContext _context;
+
+        public TransactionHistoryRepository(YourDbContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<PagedResponse<TransactionHistoryResponse>> GetTransactionHistoryPagedAsync(
+            TransactionHistoryPagedRequest request)
+        {
+            var policyId = request.PolicyID;
+            var pageIndex = Math.Max(request.PageNumber - 1, 0);
+            var pageSize = Math.Min(Math.Max(request.PageSize, 1), 100); // 1-100 limit
+
+            var response = new TransactionHistoryResponse();
+
+            // 1. WITHDRAWAL SUMMARY (max 10 records/page)
+            await GetWithdrawalSummaryAsync(response, policyId, pageIndex, pageSize);
+
+            // 2. SWITCHING TRANSACTIONS (max 10 records/page)  
+            await GetSwitchingTransactionsAsync(response, policyId, pageIndex, pageSize);
+
+            // 3. DETAIL SWITCHING (max 10 records/page)
+            await GetDetailSwitchingAsync(response, policyId, pageIndex, pageSize);
+
+            // Calculate total records dari ketiga query
+            var totalRecords = response.WithdrawalSummary.Count + 
+                             response.SwitchingTransactions.Count + 
+                             response.DetailSwitching.Count;
+
+            return new PagedResponse<TransactionHistoryResponse>
+            {
+                Data = response,
+                PageNumber = request.PageNumber,
+                PageSize = pageSize,
+                TotalRecords = totalRecords,
+                TotalPages = (int)Math.Ceiling((double)totalRecords / pageSize)
+            };
+        }
+
+        private async Task GetWithdrawalSummaryAsync(TransactionHistoryResponse response, 
+            string policyId, int pageIndex, int pageSize)
+        {
+            var sql = @"
+                SELECT DISTINCT
+                    @PolicyID as PolicyID,
+                    ISNULL(CIA.CIA_FND_TRXN_AMT, 0) as TotalWithdrawalAmount,
+                    NULL AS WithdrawalEffectiveDate,
+                    0 AS TotalAmount
+                FROM DWM_POLICY PL
+                LEFT JOIN DWT_CIA_CIA CIA ON CIA.POL_ID = PL.POL_ID
+                WHERE PL.pol_id = @PolicyID";
+
+            response.WithdrawalSummary = await _context.Database
+                .SqlQueryRaw<WithdrawalSummary>(sql, new SqlParameter("@PolicyID", policyId))
+                .Skip(pageIndex * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+        }
+
+        private async Task GetSwitchingTransactionsAsync(TransactionHistoryResponse response, 
+            string policyId, int pageIndex, int pageSize)
+        {
+            var sql = @"
+                SELECT DISTINCT
+                    CIA.CIA_EFF_DT as ActivityEffectiveDate,
+                    CIA.CIA_TYP_CD AS ActivityType,
+                    CIA.CIA_FND_TRXN_AMT AS NetAmount,
+                    CIA.CIA_REVRS_PRCES_DT AS EffectiveDateOfReversal
+                FROM SWT_CIA_CIA CIA
+                WHERE CIA.POL_ID = @PolicyID";
+
+            response.SwitchingTransactions = await _context.Database
+                .SqlQueryRaw<Switching>(sql, new SqlParameter("@PolicyID", policyId))
+                .Skip(pageIndex * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+        }
+
+        private async Task GetDetailSwitchingAsync(TransactionHistoryResponse response, 
+            string policyId, int pageIndex, int pageSize)
+        {
+            var sql = @"
+                SELECT
+                    FA.FND_ID AS Fund,
+                    FP.PUNCH_PRIC_1_AMT AS UnitPrice,
+                    FA.FIA_IMTG_AUNIT_QTY AS NetUnitChange,
+                    CAST(ISNULL(FA.CFIN_IMTS_AMUIT_QTY, 0) AS INT) AS ApproximateNumberOfUnits,
+                    0 AS FundAccumulationUnit
+                FROM DWT_FIA_FA FA
+                INNER JOIN DWT_FUND_UNIT_PRICE FP ON FP.PRO_ID = FA.FND_ID 
+                    AND FA.FIA_EFF_DT = FP.FNDVL_EFF_DT
+                WHERE FA.POL_ID = @PolicyID";
+
+            response.DetailSwitching = await _context.Database
+                .SqlQueryRaw<DetailSwitching>(sql, new SqlParameter("@PolicyID", policyId))
+                .Skip(pageIndex * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+        }
+    }
+}
