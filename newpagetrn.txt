@@ -1,0 +1,222 @@
+ITransactionHistoryRepository.cs
+
+using System.Threading.Tasks;
+using SalesforceAPI.Models;
+
+namespace SalesforceAPI.Interfaces
+{
+    public interface ITransactionHistoryRepository
+    {
+        Task<PagedResponse<TransactionHistoryResponse>> GetTransactionHistoryAsync(TransactionHistoryPagedRequest request);
+    }
+}
+
+TransactionHistoryRepository.cs 
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using SalesforceAPI.Interfaces;
+using SalesforceAPI.Models;
+
+namespace SalesforceAPI.Repositories
+{
+    public class TransactionHistoryRepository : ITransactionHistoryRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<TransactionHistoryRepository> _logger;
+
+        public TransactionHistoryRepository(IConfiguration configuration, ILogger<TransactionHistoryRepository> logger)
+        {
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                ?? throw new ArgumentNullException(nameof(configuration), "Connection string NDIBOARD33 not found.");
+            _logger = logger;
+        }
+
+        public async Task<PagedResponse<TransactionHistoryResponse>> GetTransactionHistoryAsync(TransactionHistoryPagedRequest request)
+        {
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(request.PolicyID)) throw new ArgumentException("PolicyID is required.", nameof(request.PolicyID));
+
+            var pageNumber = request.PageNumber <= 0 ? 1 : request.PageNumber;
+            var pageSize = request.PageSize <= 0 ? 10 : request.PageSize;
+            var offset = (pageNumber - 1) * pageSize;
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            // 1) TotalRecords untuk Switching (untuk kebutuhan pagination)
+            // Ganti FROM/WHERE sesuai tabel kamu (contoh di bawah mengikuti pola di screenshot: policy join transaksi).
+            var sqlCount = @"
+SELECT COUNT(1)
+FROM DWM_POLICY PL
+-- JOIN / WHERE sesuai kebutuhan
+WHERE PL.POL_ID = @PolicyID;
+";
+
+            // 2) Withdrawal Summary (contoh query; sesuaikan kolom & tabel kamu)
+            var sqlWithdrawal = @"
+SELECT DISTINCT
+    CIA.POL_ID AS PolicyID,
+    CIA.CIA_FND_TRXN_AMT AS TotalWithdrawalAmount,
+    NULL AS WithdrawalEffectiveDate,
+    0 AS TotalAmount
+FROM DWM_POLICY PL
+LEFT JOIN DWT_CIA CIA ON CIA.POL_ID = PL.POL_ID
+WHERE PL.POL_ID = @PolicyID;
+";
+
+            // 3) Switching paged (10 baris per page)
+            // Penting: pastikan ORDER BY stabil (misalnya by tanggal + id unik).
+            var sqlSwitchingPaged = @"
+SELECT
+    -- contoh kolom; sesuaikan mapping ke model Switching
+    TRX.ActivityEffectiveDate,
+    TRX.ActivityType,
+    TRX.NetAmount,
+    TRX.EffectiveDateOfReversal
+FROM (
+    SELECT
+        -- sesuaikan sumber data switching kamu
+        CAST(NULL AS datetime) AS ActivityEffectiveDate,
+        CAST('' AS varchar(50)) AS ActivityType,
+        CAST(0 AS decimal(18,2)) AS NetAmount,
+        CAST(NULL AS datetime) AS EffectiveDateOfReversal
+) TRX
+ORDER BY TRX.ActivityEffectiveDate
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
+";
+
+            // 4) DetailSwitching (contoh; biasanya relasi dengan switching/transaction id)
+            var sqlDetailSwitchingPaged = @"
+SELECT
+    DS.Fund,
+    DS.UnitPrice,
+    DS.NetUnitChange,
+    DS.ApproximateNumberOfUnits,
+    DS.FundAccumulationUnit
+FROM (
+    SELECT
+        CAST('' AS varchar(100)) AS Fund,
+        CAST(0 AS decimal(18,4)) AS UnitPrice,
+        CAST(0 AS decimal(18,4)) AS NetUnitChange,
+        CAST(0 AS int) AS ApproximateNumberOfUnits,
+        CAST(0 AS decimal(18,4)) AS FundAccumulationUnit
+) DS
+ORDER BY DS.Fund
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
+";
+
+            var param = new { PolicyID = request.PolicyID, Offset = offset, PageSize = pageSize };
+
+            try
+            {
+                var totalRecords = await connection.ExecuteScalarAsync<int>(sqlCount, new { PolicyID = request.PolicyID });
+
+                var withdrawal = (await connection.QueryAsync<WithdrawalSummary>(sqlWithdrawal, new { PolicyID = request.PolicyID }))
+                    .ToList();
+
+                var switching = (await connection.QueryAsync<Switching>(sqlSwitchingPaged, param))
+                    .ToList();
+
+                var detailSwitching = (await connection.QueryAsync<DetailSwitching>(sqlDetailSwitchingPaged, param))
+                    .ToList();
+
+                var totalPages = (int)Math.Ceiling(totalRecords / (double)pageSize);
+
+                var data = new TransactionHistoryResponse
+                {
+                    WithdrawalSummary = withdrawal,
+                    SwitchingTransactions = switching,
+                    DetailSwitching = detailSwitching
+                };
+
+                return new PagedResponse<TransactionHistoryResponse>
+                {
+                    Data = data,
+                    PageNumber = pageNumber,
+                    PageSize = pageSize,
+                    TotalRecords = totalRecords,
+                    TotalPages = totalPages
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error GetTransactionHistoryAsync PolicyID={PolicyID}", request.PolicyID);
+                throw;
+            }
+        }
+    }
+}
+
+TransactionHistoryController.cs
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
+using SalesforceAPI.Interfaces;
+using SalesforceAPI.Models;
+
+namespace SalesforceAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class TransactionHistoryController : ControllerBase
+    {
+        private readonly ITransactionHistoryRepository _repository;
+        private readonly ILogger<TransactionHistoryController> _logger;
+
+        public TransactionHistoryController(ITransactionHistoryRepository repository, ILogger<TransactionHistoryController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        /// <summary>
+        /// Get Transaction History dengan Pagination (default 10 baris per halaman)
+        /// </summary>
+        [HttpPost]
+        [ProducesResponseType(typeof(PagedResponse<TransactionHistoryResponse>), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> Post([FromBody] TransactionHistoryPagedRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.PolicyID))
+                return BadRequest("policyID is required.");
+
+            var result = await _repository.GetTransactionHistoryAsync(request);
+            return Ok(result);
+        }
+    }
+}
+
+Program.cs
+
+using SalesforceAPI.Interfaces;
+using SalesforceAPI.Repositories;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNamingPolicy = null;
+        options.JsonSerializerOptions.DefaultIgnoreCondition =
+            System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
+    });
+
+builder.Services.AddScoped<ITransactionHistoryRepository, TransactionHistoryRepository>();
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+app.UseSwagger();
+app.UseSwaggerUI();
+
+app.MapControllers();
+app.Run();
