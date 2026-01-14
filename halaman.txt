@@ -1,0 +1,69 @@
+public async Task<PolicyListResponse> GetPoliciesAsync(string? policyId, string? appNo, int page, int pageSize)
+{
+    using var conn = _connectionFactory.CreateNDIPRINT33Connection();
+    await conn.OpenAsync();
+    
+    var offset = (page - 1) * pageSize;
+    var response = new PolicyListResponse { Page = page, PageSize = pageSize };
+
+    // OPTIMIZATION 1: OPENQUERY untuk linked server (paling cepat)
+    var whereConditions = new List<string>();
+    var parameters = new DynamicParameters();
+    
+    if (!string.IsNullOrEmpty(policyId))
+    {
+        whereConditions.Add("tce.EPolPolicyID LIKE @policyIdPattern");
+        parameters.Add("@policyIdPattern", $"%{policyId}%");
+    }
+    
+    if (!string.IsNullOrEmpty(appNo))
+    {
+        whereConditions.Add("dpi.POL_APP_FORM_ID LIKE @appNoPattern");
+        parameters.Add("@appNoPattern", $"%{appNo}%");
+    }
+
+    var whereClause = whereConditions.Count > 0 ? " AND " + string.Join(" AND ", whereConditions) : "";
+    
+    // OPTIMIZATION 2: Base query dengan OPENQUERY
+    var baseSql = $@"
+        SELECT 
+            'CP' AS CompanyID,
+            tce.EPolPolicyID AS PolicyID,
+            dpi.POL_APP_FORM_ID AS AppNo,
+            CONCAT(ISNULL(dpi.OWN_FIRST_NAME,''), ' ', ISNULL(dpi.OWN_LAST_NAME,'')) AS OwnerName,
+            dpi.POL_ISS_EFF_DT AS IssuedDate
+        FROM dbo.tconsolidate_epolicy tce WITH (NOLOCK)
+        OUTER APPLY (
+            SELECT TOP 1 POL_APP_FORM_ID, OWN_FIRST_NAME, OWN_LAST_NAME, POL_ISS_EFF_DT
+            FROM OPENQUERY(LNKSV801041, 
+                'SELECT POL_ID, POL_APP_FORM_ID, OWN_FIRST_NAME, OWN_LAST_NAME, POL_ISS_EFF_DT 
+                 FROM NDIBORD02.dbo.DWM_POLICY_INFO 
+                 WHERE CO_ID = ''CP'' AND POL_ID = ''' + tce.EPolPolicyID + '''')
+        ) dpi
+        WHERE 1=1 {whereClause}";
+
+    parameters.Add("@offset", offset);
+    parameters.Add("@pageSize", pageSize);
+
+    // OPTIMIZATION 3: Parallel execution count + data
+    var countTask = Task.Run(async () =>
+    {
+        var countSql = $"SELECT COUNT(*) FROM ({baseSql}) AS CountQuery";
+        return await conn.QuerySingleAsync<long>(countSql, parameters);
+    });
+
+    var dataSql = $@"{baseSql}
+        ORDER BY tce.EPolDate DESC
+        OFFSET @offset ROWS 
+        FETCH NEXT @pageSize ROWS ONLY";
+
+    var policiesTask = conn.QueryAsync<ConsolidatePolicy>(dataSql, parameters);
+
+    await Task.WhenAll(countTask, policiesTask);
+    
+    response.TotalRecords = await countTask;
+    response.Policies = (await policiesTask).ToList();
+    response.TotalPages = (int)Math.Ceiling((double)response.TotalRecords / pageSize);
+
+    return response;
+}
