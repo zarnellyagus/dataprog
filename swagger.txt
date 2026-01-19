@@ -1,0 +1,69 @@
+using SalesforceAPI.Interfaces;
+using SalesforceAPI.Repositories;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add controllers
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNamingPolicy = null;
+        options.JsonSerializerOptions.DefaultIgnoreCondition = 
+            System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
+    });
+
+// Register repositories
+builder.Services.AddScoped<IPolicyDetailsRepository, PolicyDetailsRepository>();
+builder.Services.AddScoped<IValueInformationRepository, ValueInformationRepository>();
+builder.Services.AddScoped<IBenefitInformationRepository, BenefitInformationRepository>();
+builder.Services.AddScoped<IAnticipatedEndowmentRepository, AnticipatedEndowmentRepository>();
+builder.Services.AddScoped<IRelatedPolicyRepository, RelatedPolicyRepository>();
+builder.Services.AddScoped<ITransactionHistoryRepository, TransactionHistoryRepository>();
+builder.Services.AddScoped<IFundIquiryActivityRepository, FundIquiryActivityRepository>();
+
+// Add API Explorer
+builder.Services.AddEndpointsApiExplorer();
+
+// Add Swagger
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+    {
+        Title = "Policy Details API",
+        Version = "v1",
+        Description = "API for retrieving policy and beneficiary details"
+    });
+});
+
+// Add CORS (jika diperlukan untuk Angular)
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll",
+        policy => policy.AllowAnyOrigin()
+                       .AllowAnyMethod()
+                       .AllowAnyHeader());
+});
+
+var app = builder.Build();
+
+// Configure middleware pipeline
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Policy Details API V1");
+    c.RoutePrefix = string.Empty; // Swagger di root URL
+});
+
+// Enable CORS
+app.UseCors("AllowAll");
+
+// HTTPS Redirection
+app.UseHttpsRedirection();
+
+// Authorization
+app.UseAuthorization();
+
+// MAP CONTROLLERS - INI YANG PALING PENTING!
+app.MapControllers();
+
+app.Run();
