@@ -1,0 +1,494 @@
+Berikut adalah panduan lengkap untuk mengambil data dari Ingenium menggunakan SOAP Web Service:
+
+Metode 1: Menggunakan C# Console Application
+Langkah 1: Buat Service Reference
+// 1. Buka Visual Studio
+// 2. Create New Console Application
+// 3. Right-click Project → Add → Service Reference
+// 4. Masukkan WSDL URL Ingenium: 
+//    https://ingenium-server.company.com/services/PolicyService.svc?wsdl
+// 5. Klik "Go" → Beri nama "IngeniumService" → Klik OK
+
+Langkah 2: Code untuk Consume SOAP Service
+
+using System;
+using System.ServiceModel;
+using System.ServiceModel.Channels;
+
+namespace IngeniumSOAPClient
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            // 1. Configure Binding
+            var binding = new BasicHttpBinding
+            {
+                Security = new BasicHttpSecurity
+                {
+                    Mode = BasicHttpSecurityMode.Transport, // HTTPS
+                    Transport = new HttpTransportSecurity
+                    {
+                        ClientCredentialType = HttpClientCredentialType.Basic
+                    }
+                },
+                MaxReceivedMessageSize = 2147483647, // 2GB max
+                MaxBufferSize = 2147483647,
+                SendTimeout = TimeSpan.FromMinutes(10),
+                ReceiveTimeout = TimeSpan.FromMinutes(10)
+            };
+
+            // 2. Configure Endpoint
+            var endpoint = new EndpointAddress(
+                "https://ingenium-server.company.com/services/PolicyService.svc"
+            );
+
+            // 3. Create Service Client
+            var client = new IngeniumService.PolicyServiceClient(binding, endpoint);
+            
+            // 4. Set Credentials
+            client.ClientCredentials.UserName.UserName = "your_username";
+            client.ClientCredentials.UserName.Password = "your_password";
+
+            try
+            {
+                // 5. Call Service Method - Get Policy Details
+                var request = new IngeniumService.GetPolicyRequest
+                {
+                    PolicyNumber = "POL-2026-001",
+                    CompanyCode = "ABC"
+                };
+
+                var response = client.GetPolicyDetails(request);
+
+                // 6. Process Response
+                Console.WriteLine($"Policy Number: {response.PolicyNumber}");
+                Console.WriteLine($"Client Name: {response.ClientName}");
+                Console.WriteLine($"Sum Assured: {response.SumAssured}");
+                Console.WriteLine($"Premium: {response.Premium}");
+                Console.WriteLine($"Status: {response.Status}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+            }
+            finally
+            {
+                // 7. Close Connection
+                if (client.State == CommunicationState.Faulted)
+                {
+                    client.Abort();
+                }
+                else
+                {
+                    client.Close();
+                }
+            }
+
+            Console.ReadLine();
+        }
+    }
+}
+
+Metode 2: Manual SOAP Request dengan HttpWebRequest
+
+using System;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Xml;
+
+namespace IngeniumSOAPManual
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            // Call service
+            string policyNumber = "POL-2026-001";
+            string xmlResponse = CallIngeniumSOAPService(policyNumber);
+            
+            Console.WriteLine("Response:");
+            Console.WriteLine(xmlResponse);
+            Console.ReadLine();
+        }
+
+        static string CallIngeniumSOAPService(string policyNumber)
+        {
+            // 1. Create SOAP Request
+            HttpWebRequest request = CreateSOAPWebRequest();
+            
+            // 2. Create SOAP Body
+            XmlDocument soapEnvelope = CreateSOAPEnvelope(policyNumber);
+            
+            // 3. Insert SOAP envelope into request
+            using (Stream stream = request.GetRequestStream())
+            {
+                soapEnvelope.Save(stream);
+            }
+            
+            // 4. Get Response
+            using (WebResponse response = request.GetResponse())
+            {
+                using (StreamReader reader = new StreamReader(response.GetResponseStream()))
+                {
+                    return reader.ReadToEnd();
+                }
+            }
+        }
+
+        static HttpWebRequest CreateSOAPWebRequest()
+        {
+            string url = "https://ingenium-server.company.com/services/PolicyService.svc";
+            
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            
+            // Set credentials
+            string username = "your_username";
+            string password = "your_password";
+            request.Credentials = new NetworkCredential(username, password);
+            
+            // Set headers
+            request.Headers.Add("SOAPAction", "http://ingenium.dxc.com/GetPolicyDetails");
+            request.ContentType = "text/xml;charset=utf-8";
+            request.Accept = "text/xml";
+            request.Method = "POST";
+            request.Timeout = 300000; // 5 minutes
+            
+            return request;
+        }
+
+        static XmlDocument CreateSOAPEnvelope(string policyNumber)
+        {
+            XmlDocument soapEnvelope = new XmlDocument();
+            
+            string soapBody = $@"<?xml version=""1.0"" encoding=""utf-8""?>
+<soap:Envelope xmlns:soap=""http://schemas.xmlsoap.org/soap/envelope/"" 
+               xmlns:ing=""http://ingenium.dxc.com/services"">
+   <soap:Header/>
+   <soap:Body>
+      <ing:GetPolicyDetails>
+         <ing:PolicyNumber>{policyNumber}</ing:PolicyNumber>
+         <ing:CompanyCode>ABC</ing:CompanyCode>
+      </ing:GetPolicyDetails>
+   </soap:Body>
+</soap:Envelope>";
+
+            soapEnvelope.LoadXml(soapBody);
+            return soapEnvelope;
+        }
+    }
+}
+Metode 3: Menggunakan SSIS untuk Load Data dari SOAP
+// Di dalam SSIS Script Task
+#region Namespaces
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.ServiceModel;
+using Microsoft.SqlServer.Dts.Runtime;
+#endregion
+
+public void Main()
+{
+    try
+    {
+        // 1. Get Variables
+        string ingeniumUrl = Dts.Variables["IngeniumServiceUrl"].Value.ToString();
+        string username = Dts.Variables["Username"].Value.ToString();
+        string password = Dts.Variables["Password"].Value.ToString();
+        string connectionString = Dts.Variables["LocalDBConnectionString"].Value.ToString();
+
+        // 2. Configure SOAP Client
+        var binding = new BasicHttpBinding
+        {
+            Security = new BasicHttpSecurity
+            {
+                Mode = BasicHttpSecurityMode.Transport
+            },
+            MaxReceivedMessageSize = 2147483647
+        };
+
+        var endpoint = new EndpointAddress(ingeniumUrl);
+        var client = new PolicyServiceClient(binding, endpoint);
+        client.ClientCredentials.UserName.UserName = username;
+        client.ClientCredentials.UserName.Password = password;
+
+        // 3. Call SOAP Service to Get Policies
+        var response = client.GetAllPolicies(new GetAllPoliciesRequest
+        {
+            StartDate = DateTime.Now.AddDays(-30),
+            EndDate = DateTime.Now
+        });
+
+        // 4. Save to Local Database
+        using (SqlConnection conn = new SqlConnection(connectionString))
+        {
+            conn.Open();
+            
+            // Truncate staging table
+            SqlCommand truncCmd = new SqlCommand("TRUNCATE TABLE staging.TPOL", conn);
+            truncCmd.ExecuteNonQuery();
+
+            // Insert data
+            foreach (var policy in response.Policies)
+            {
+                string insertSQL = @"
+                    INSERT INTO staging.TPOL 
+                    (PolicyNumber, ClientID, SumAssured, Premium, Status, LoadDate)
+                    VALUES 
+                    (@PolicyNumber, @ClientID, @SumAssured, @Premium, @Status, GETDATE())";
+
+                SqlCommand cmd = new SqlCommand(insertSQL, conn);
+                cmd.Parameters.AddWithValue("@PolicyNumber", policy.PolicyNumber);
+                cmd.Parameters.AddWithValue("@ClientID", policy.ClientID);
+                cmd.Parameters.AddWithValue("@SumAssured", policy.SumAssured);
+                cmd.Parameters.AddWithValue("@Premium", policy.Premium);
+                cmd.Parameters.AddWithValue("@Status", policy.Status);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        client.Close();
+        Dts.TaskResult = (int)ScriptResults.Success;
+    }
+    catch (Exception ex)
+    {
+        Dts.Events.FireError(0, "SOAP Call", ex.Message, "", 0);
+        Dts.TaskResult = (int)ScriptResults.Failure;
+    }
+}
+
+Map Output ke SQL Server Destination
+
+Metode 4: Parse XML Response
+Code untuk Parse SOAP Response
+
+using System.Xml.Linq;
+using System.Linq;
+
+static void ParseSOAPResponse(string xmlResponse)
+{
+    // Load XML
+    XDocument doc = XDocument.Parse(xmlResponse);
+    
+    // Define namespaces
+    XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
+    XNamespace ing = "http://ingenium.dxc.com/services";
+    
+    // Get policies from response
+    var policies = doc.Descendants(ing + "Policy");
+    
+    foreach (var policy in policies)
+    {
+        string policyNumber = policy.Element(ing + "PolicyNumber")?.Value;
+        string clientID = policy.Element(ing + "ClientID")?.Value;
+        decimal sumAssured = decimal.Parse(policy.Element(ing + "SumAssured")?.Value ?? "0");
+        decimal premium = decimal.Parse(policy.Element(ing + "Premium")?.Value ?? "0");
+        string status = policy.Element(ing + "Status")?.Value;
+        
+        Console.WriteLine($"{policyNumber} - {clientID} - {sumAssured} - {premium} - {status}");
+        
+        // Save to database
+        SaveToDatabase(policyNumber, clientID, sumAssured, premium, status);
+    }
+}
+
+static void SaveToDatabase(string policyNumber, string clientID, 
+                          decimal sumAssured, decimal premium, string status)
+{
+    string connString = "Server=localhost;Database=IngeniumLocal;Integrated Security=true;";
+    
+    using (SqlConnection conn = new SqlConnection(connString))
+    {
+        conn.Open();
+        
+        string sql = @"
+            INSERT INTO staging.TPOL 
+            (PolicyNumber, ClientID, SumAssured, Premium, Status, LoadDate)
+            VALUES 
+            (@PolicyNumber, @ClientID, @SumAssured, @Premium, @Status, GETDATE())";
+        
+        using (SqlCommand cmd = new SqlCommand(sql, conn))
+        {
+            cmd.Parameters.AddWithValue("@PolicyNumber", policyNumber);
+            cmd.Parameters.AddWithValue("@ClientID", clientID);
+            cmd.Parameters.AddWithValue("@SumAssured", sumAssured);
+            cmd.Parameters.AddWithValue("@Premium", premium);
+            cmd.Parameters.AddWithValue("@Status", status);
+            cmd.ExecuteNonQuery();
+        }
+    }
+}
+
+Berikut adalah struktur lengkap SOAP request untuk mengambil data TPOL (Policy) dari Ingenium:
+
+Struktur SOAP Request Dasar untuk TPOL
+1. Get Single Policy (TPOL) by Policy Number
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" 
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+   
+   <soap:Header>
+      <!-- Authentication Header -->
+      <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+         <wsse:UsernameToken>
+            <wsse:Username>your_username</wsse:Username>
+            <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">
+               your_password
+            </wsse:Password>
+         </wsse:UsernameToken>
+      </wsse:Security>
+      
+      <!-- Request Header (Optional) -->
+      <ing:RequestHeader xmlns:ing="http://ingenium.dxc.com/services">
+         <ing:CompanyCode>ABC</ing:CompanyCode>
+         <ing:BranchCode>001</ing:BranchCode>
+         <ing:RequestID>REQ-2026-0128-001</ing:RequestID>
+         <ing:Timestamp>2026-01-28T00:40:00+07:00</ing:Timestamp>
+      </ing:RequestHeader>
+   </soap:Header>
+   
+   <soap:Body>
+      <ing:GetPolicyDetails xmlns:ing="http://ingenium.dxc.com/services">
+         <ing:PolicyNumber>POL-2026-001</ing:PolicyNumber>
+         <ing:IncludeCoverage>true</ing:IncludeCoverage>
+         <ing:IncludeClient>true</ing:IncludeClient>
+         <ing:IncludeRequirements>false</ing:IncludeRequirements>
+      </ing:GetPolicyDetails>
+   </soap:Body>
+   
+</soap:Envelope>
+2. Get Multiple Policies (Bulk Query)
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:ing="http://ingenium.dxc.com/services">
+   
+   <soap:Header>
+      <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+         <wsse:UsernameToken>
+            <wsse:Username>your_username</wsse:Username>
+            <wsse:Password>your_password</wsse:Password>
+         </wsse:UsernameToken>
+      </wsse:Security>
+   </soap:Header>
+   
+   <soap:Body>
+      <ing:GetPoliciesByDateRange>
+         <ing:StartDate>2026-01-01</ing:StartDate>
+         <ing:EndDate>2026-01-28</ing:EndDate>
+         <ing:CompanyCode>ABC</ing:CompanyCode>
+         <ing:Status>Active</ing:Status>
+         <ing:PageSize>1000</ing:PageSize>
+         <ing:PageNumber>1</ing:PageNumber>
+      </ing:GetPoliciesByDateRange>
+   </soap:Body>
+   
+</soap:Envelope>
+3. Get Policies by Client ID
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:ing="http://ingenium.dxc.com/services">
+   
+   <soap:Header>
+      <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+         <wsse:UsernameToken>
+            <wsse:Username>your_username</wsse:Username>
+            <wsse:Password>your_password</wsse:Password>
+         </wsse:UsernameToken>
+      </wsse:Security>
+   </soap:Header>
+   
+   <soap:Body>
+      <ing:GetPoliciesByClient>
+         <ing:ClientID>CLI-12345</ing:ClientID>
+         <ing:IncludeTerminated>false</ing:IncludeTerminated>
+      </ing:GetPoliciesByClient>
+   </soap:Body>
+   
+</soap:Envelope>
+4. Get Policy with Full Details (TPOL + Related Tables)
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:ing="http://ingenium.dxc.com/services">
+   
+   <soap:Header>
+      <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+         <wsse:UsernameToken>
+            <wsse:Username>your_username</wsse:Username>
+            <wsse:Password>your_password</wsse:Password>
+         </wsse:UsernameToken>
+      </wsse:Security>
+   </soap:Header>
+   
+   <soap:Body>
+      <ing:GetPolicyFullDetails>
+         <ing:PolicyNumber>POL-2026-001</ing:PolicyNumber>
+         
+         <!-- Include Related Tables -->
+         <ing:IncludeOptions>
+            <ing:IncludeTPOL>true</ing:IncludeTPOL>
+            <ing:IncludeTPOLC>true</ing:IncludeTPOLC>
+            <ing:IncludeTCV>true</ing:IncludeTCV>           <!-- Coverage -->
+            <ing:IncludeTCLI>true</ing:IncludeTCLI>         <!-- Client -->
+            <ing:IncludeTPH>true</ing:IncludeTPH>           <!-- Plan -->
+            <ing:IncludeTBRCH>true</ing:IncludeTBRCH>       <!-- Branch -->
+            <ing:IncludeTREQT>false</ing:IncludeTREQT>      <!-- Requirements -->
+            <ing:IncludeTDOCM>false</ing:IncludeTDOCM>      <!-- Documents -->
+         </ing:IncludeOptions>
+      </ing:GetPolicyFullDetails>
+   </soap:Body>
+   
+</soap:Envelope>
+5. Query Policies with Filters
+
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:ing="http://ingenium.dxc.com/services">
+   
+   <soap:Header>
+      <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+         <wsse:UsernameToken>
+            <wsse:Username>your_username</wsse:Username>
+            <wsse:Password>your_password</wsse:Password>
+         </wsse:UsernameToken>
+      </wsse:Security>
+   </soap:Header>
+   
+   <soap:Body>
+      <ing:QueryPolicies>
+         <ing:QueryCriteria>
+            <!-- Date Range Filter -->
+            <ing:IssueDate>
+               <ing:From>2026-01-01</ing:From>
+               <ing:To>2026-01-28</ing:To>
+            </ing:IssueDate>
+            
+            <!-- Status Filter -->
+            <ing:Status>
+               <ing:StatusCode>Active</ing:StatusCode>
+            </ing:Status>
+            
+            <!-- Sum Assured Range -->
+            <ing:SumAssured>
+               <ing:MinAmount>100000</ing:MinAmount>
+               <ing:MaxAmount>5000000</ing:MaxAmount>
+            </ing:SumAssured>
+            
+            <!-- Company/Branch Filter -->
+            <ing:CompanyCode>ABC</ing:CompanyCode>
+            <ing:BranchCode>001</ing:BranchCode>
+            
+            <!-- Product Filter -->
+            <ing:PlanCode>WL-001</ing:PlanCode>
+            
+            <!-- Pagination -->
+            <ing:PageSize>500</ing:PageSize>
+            <ing:PageNumber>1</ing:PageNumber>
+         </ing:QueryCriteria>
+      </ing:QueryPolicies>
+   </soap:Body>
+   
+</soap:Envelope>
+

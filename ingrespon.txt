@@ -1,0 +1,178 @@
+
+C# Code untuk Send Request dan Parse Response
+using System;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Xml;
+using System.Xml.Linq;
+
+public class IngeniumTPOLClient
+{
+    private string serviceUrl;
+    private string username;
+    private string password;
+    
+    public IngeniumTPOLClient(string url, string user, string pass)
+    {
+        serviceUrl = url;
+        username = user;
+        password = pass;
+    }
+    
+    // Get single policy
+    public PolicyData GetPolicyDetails(string policyNumber)
+    {
+        string soapRequest = CreateGetPolicyRequest(policyNumber);
+        string soapResponse = SendSOAPRequest(soapRequest);
+        return ParsePolicyResponse(soapResponse);
+    }
+    
+    // Get multiple policies
+    public List<PolicyData> GetPoliciesByDateRange(DateTime startDate, DateTime endDate)
+    {
+        string soapRequest = CreateGetPoliciesRequest(startDate, endDate);
+        string soapResponse = SendSOAPRequest(soapRequest);
+        return ParsePoliciesResponse(soapResponse);
+    }
+    
+    private string CreateGetPolicyRequest(string policyNumber)
+    {
+        return $@"<?xml version=""1.0"" encoding=""utf-8""?>
+<soap:Envelope xmlns:soap=""http://schemas.xmlsoap.org/soap/envelope/"" 
+               xmlns:ing=""http://ingenium.dxc.com/services"">
+   <soap:Header>
+      <wsse:Security xmlns:wsse=""http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"">
+         <wsse:UsernameToken>
+            <wsse:Username>{username}</wsse:Username>
+            <wsse:Password>{password}</wsse:Password>
+         </wsse:UsernameToken>
+      </wsse:Security>
+   </soap:Header>
+   <soap:Body>
+      <ing:GetPolicyDetails>
+         <ing:PolicyNumber>{policyNumber}</ing:PolicyNumber>
+         <ing:IncludeCoverage>true</ing:IncludeCoverage>
+         <ing:IncludeClient>true</ing:IncludeClient>
+      </ing:GetPolicyDetails>
+   </soap:Body>
+</soap:Envelope>";
+    }
+    
+    private string CreateGetPoliciesRequest(DateTime startDate, DateTime endDate)
+    {
+        return $@"<?xml version=""1.0"" encoding=""utf-8""?>
+<soap:Envelope xmlns:soap=""http://schemas.xmlsoap.org/soap/envelope/"" 
+               xmlns:ing=""http://ingenium.dxc.com/services"">
+   <soap:Header>
+      <wsse:Security xmlns:wsse=""http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"">
+         <wsse:UsernameToken>
+            <wsse:Username>{username}</wsse:Username>
+            <wsse:Password>{password}</wsse:Password>
+         </wsse:UsernameToken>
+      </wsse:Security>
+   </soap:Header>
+   <soap:Body>
+      <ing:GetPoliciesByDateRange>
+         <ing:StartDate>{startDate:yyyy-MM-dd}</ing:StartDate>
+         <ing:EndDate>{endDate:yyyy-MM-dd}</ing:EndDate>
+         <ing:CompanyCode>ABC</ing:CompanyCode>
+         <ing:PageSize>1000</ing:PageSize>
+         <ing:PageNumber>1</ing:PageNumber>
+      </ing:GetPoliciesByDateRange>
+   </soap:Body>
+</soap:Envelope>";
+    }
+    
+    private string SendSOAPRequest(string soapRequest)
+    {
+        HttpWebRequest request = (HttpWebRequest)WebRequest.Create(serviceUrl);
+        request.Headers.Add("SOAPAction", "http://ingenium.dxc.com/GetPolicyDetails");
+        request.ContentType = "text/xml;charset=utf-8";
+        request.Accept = "text/xml";
+        request.Method = "POST";
+        request.Timeout = 300000;
+        
+        // Write request
+        byte[] bytes = Encoding.UTF8.GetBytes(soapRequest);
+        request.ContentLength = bytes.Length;
+        
+        using (Stream requestStream = request.GetRequestStream())
+        {
+            requestStream.Write(bytes, 0, bytes.Length);
+        }
+        
+        // Get response
+        using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+        using (StreamReader reader = new StreamReader(response.GetResponseStream()))
+        {
+            return reader.ReadToEnd();
+        }
+    }
+    
+    private PolicyData ParsePolicyResponse(string xmlResponse)
+    {
+        XDocument doc = XDocument.Parse(xmlResponse);
+        XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
+        XNamespace ing = "http://ingenium.dxc.com/services";
+        
+        var policy = doc.Descendants(ing + "Policy").FirstOrDefault();
+        
+        if (policy == null) return null;
+        
+        return new PolicyData
+        {
+            PolicyNumber = policy.Element(ing + "PolicyNumber")?.Value,
+            PolicyID = policy.Element(ing + "PolicyID")?.Value,
+            ClientID = policy.Element(ing + "ClientID")?.Value,
+            CompanyCode = policy.Element(ing + "CompanyCode")?.Value,
+            BranchCode = policy.Element(ing + "BranchCode")?.Value,
+            PlanCode = policy.Element(ing + "PlanCode")?.Value,
+            IssueDate = DateTime.Parse(policy.Element(ing + "IssueDate")?.Value ?? DateTime.MinValue.ToString()),
+            Status = policy.Element(ing + "Status")?.Value,
+            SumAssured = decimal.Parse(policy.Element(ing + "SumAssured")?.Value ?? "0"),
+            Premium = decimal.Parse(policy.Element(ing + "Premium")?.Value ?? "0"),
+            Currency = policy.Element(ing + "Currency")?.Value,
+            PaymentMode = policy.Element(ing + "PaymentMode")?.Value
+        };
+    }
+    
+    private List<PolicyData> ParsePoliciesResponse(string xmlResponse)
+    {
+        var policies = new List<PolicyData>();
+        
+        XDocument doc = XDocument.Parse(xmlResponse);
+        XNamespace ing = "http://ingenium.dxc.com/services";
+        
+        foreach (var policy in doc.Descendants(ing + "Policy"))
+        {
+            policies.Add(new PolicyData
+            {
+                PolicyNumber = policy.Element(ing + "PolicyNumber")?.Value,
+                ClientID = policy.Element(ing + "ClientID")?.Value,
+                SumAssured = decimal.Parse(policy.Element(ing + "SumAssured")?.Value ?? "0"),
+                Premium = decimal.Parse(policy.Element(ing + "Premium")?.Value ?? "0"),
+                Status = policy.Element(ing + "Status")?.Value
+            });
+        }
+        
+        return policies;
+    }
+}
+
+// Data model
+public class PolicyData
+{
+    public string PolicyNumber { get; set; }
+    public string PolicyID { get; set; }
+    public string ClientID { get; set; }
+    public string CompanyCode { get; set; }
+    public string BranchCode { get; set; }
+    public string PlanCode { get; set; }
+    public DateTime IssueDate { get; set; }
+    public string Status { get; set; }
+    public decimal SumAssured { get; set; }
+    public decimal Premium { get; set; }
+    public string Currency { get; set; }
+    public string PaymentMode { get; set; }
+}

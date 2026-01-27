@@ -1,0 +1,224 @@
+Modul Client Management
+Tabel-tabel yang mengelola informasi klien:
+​
+
+TCLI (Client): Data utama klien/nasabah
+
+TCLIA (Client Address): Alamat klien
+
+TCOCL (Company Client): Relasi klien dengan perusahaan
+
+TUSEC (User): Data pengguna sistem
+
+TMIBT (Client MIB Transaction): Transaksi Medical Information Bureau
+
+Modul Underwriting
+Tabel-tabel yang mengelola proses underwriting:
+​
+
+TUCON (Client Underwriting Worksheet): Lembar kerja underwriting klien
+
+TUWAS (Underwriter Assignment Rule): Aturan penugasan underwriter
+
+TUWML (Clear Case Test Location Group): Lokasi grup test clear case
+
+TUWMF (Clear Case Test Form Type): Tipe form test clear case
+
+TUWMS (Clear Case Test Subsidiary Company): Subsidiary company test case
+
+TUWMR (Clear Case Test Requirement): Requirement test case
+
+Modul Policy Management
+Tabel-tabel yang mengelola polis asuransi:
+​
+
+TPOL (Policy): Data polis utama
+
+TPOLC (Policy): Detail polis
+
+TCV (Coverage): Pertanggungan/coverage
+
+TPCOM (Company): Data perusahaan
+
+TSCOM (Subsidiary Company): Subsidiary company
+
+TSCCL (Subsidiary Company Client): Klien subsidiary company
+
+TSCXT (Subsidiary Company Calculation Exit): Exit kalkulasi subsidiary
+
+Modul Product & Plan
+Tabel-tabel yang mengelola produk asuransi:
+​
+
+TPH (Plan): Rencana/plan produk
+
+TPCXT (Plan Calculation Exit): Exit kalkulasi plan
+
+TASMB (Contract Assembly): Assembly kontrak
+
+TBRCH (Branch): Cabang
+
+Modul Requirements & Medical
+Tabel-tabel yang mengelola requirement dan medical:
+​
+
+TREQT (Client or Policy Requirement): Requirement klien atau polis
+
+TEVRQ (Event Requirement): Requirement event
+
+TATAB (Age & Amt Default Requirement): Default requirement berdasarkan usia & amount
+
+TRTAB (Requirement): Master requirement
+
+TLRTT (Lab Test): Test laboratorium
+
+TLABT (Lab Test Standard): Standar test lab
+
+TLABR (Matched Client Lab Test): Test lab klien yang matched
+
+TLABU (Unmatched Client Lab Test): Test lab klien yang unmatched
+
+TMEDI (Client Medical Disorder): Gangguan medis klien
+
+Modul Information & Variables
+Tabel-tabel yang mengelola informasi tetap dan variabel:
+​
+
+TOCI (Insured Fixed Information): Informasi tetap tertanggung
+
+TAPPV (Insured Variable Information): Informasi variabel tertanggung
+
+TDFLD (Defined Field): Field yang didefinisikan
+
+Modul Events & Transactions
+Tabel-tabel yang mengelola event dan transaksi:
+​
+
+TXEVT (Event): Event/kejadian
+
+TXLDD (Life Document Detail): Detail dokumen life
+
+TXLFD (Life Transaction Extract Header): Header ekstrak transaksi life
+
+TXEHT (Life Transaction Extract Header): Header ekstrak transaksi
+
+TXEDT (Life Transaction Extract Detail): Detail ekstrak transaksi
+
+TXEKT (Life Transaction Extract Key): Key ekstrak transaksi
+
+Modul Document Management
+Tabel-tabel yang mengelola dokumen:
+​
+
+TDOCM (Document): Master dokumen
+
+TDTOK (Document Token): Token dokumen
+
+TTOKN (Token): Master token
+
+TTXTO (External Document Token): Token dokumen eksternal
+
+TTXRL (External Document Relationship): Relasi dokumen eksternal
+
+TDBRL (Document Table Relationship): Relasi tabel dokumen
+
+TDXDD (Life Document Detail): Detail dokumen life
+
+TDXDH (Life Document Header): Header dokumen life
+
+TAMEX (Amendment or Exclusion): Amendment atau pengecualian
+
+TPRTX (Print Request): Request print
+
+TAPLN (AP Notice): Notice AP
+
+TBILN (Billing Notice): Notice billing
+
+TPRTR (Printer): Printer
+
+TMSGS (User Message): Pesan user
+
+Modul Batch Processing
+Tabel-tabel yang mengelola batch processing:
+​
+
+TBPGA (Batch Program Group Assignment): Penugasan grup program batch
+
+TBPEX (Batch Program Execution): Eksekusi program batch
+
+Modul System & Security
+Tabel-tabel yang mengelola sistem dan keamanan:
+​
+
+TUSCL (Security Class): Kelas keamanan
+
+TASCL (Application Security Class): Kelas keamanan aplikasi
+
+TBPFL (Business Process Flow): Alur proses bisnis
+
+TBPFS (Business Process Flow Security): Keamanan alur proses bisnis
+
+TBPFC (Business Process Flow Concurrency Rate): Rate konkurensi alur proses
+
+TAUDT (Audited Database Change): Perubahan database yang diaudit
+
+TMSAU (Audited Message): Pesan yang diaudit
+
+TERLG (Abend Error Log): Log error abend
+
+TUSES (User Session): Sesi user
+
+TUSER (User Session Total): Total sesi user
+
+Modul Reference & Master Data
+Tabel-tabel yang mengelola data referensi:
+​
+
+TCTRY (Country): Negara
+
+TCTLC (Country Location): Lokasi negara
+
+TCRAS (Country Region Assignment): Penugasan region negara
+
+TCRCY (Currency): Mata uang
+
+TCXRT (Currency Exchange Rate): Nilai tukar mata uang
+
+TXSYS (External System Profile): Profil sistem eksternal
+
+TXEVT (External System Event Profile): Profil event sistem eksternal
+
+TDMAV (Data Model Allowed Value): Nilai yang diperbolehkan dalam data model
+
+TDMAD (Data Model Allowed Value Description): Deskripsi nilai yang diperbolehkan
+
+TDMAS (Data Model Allowed Value Subset): Subset nilai yang diperbolehkan
+
+TTAB (Translation Table): Tabel translasi
+
+TLGAS (Location Group Assignment): Penugasan grup lokasi
+
+Relasi dengan Tabel Lain
+Tabel TPOL memiliki relasi dengan beberapa tabel penting dalam sistem Ingenium:
+
+TCLI (Client): Relasi dengan data klien/pemegang polis
+
+TBRCH (Branch): Relasi dengan cabang yang mengeluarkan polis
+
+TCOCL (Company Client): Relasi dengan perusahaan klien
+
+TCVG/TCV (Coverage): Relasi dengan coverage/pertanggungan dalam polis
+
+TPCOM (Company): Relasi dengan perusahaan asuransi
+
+TSCOM (Subsidiary Company): Relasi dengan subsidiary company
+
+TPH (Plan): Relasi dengan plan/rencana produk asuransi
+
+TREQT (Client or Policy Requirement): Relasi dengan requirement polis
+
+TXEVT (Event): Relasi dengan event/kejadian terkait polis
+
+TDOCM (Document): Relasi dengan dokumen polis
+
+TAMEX (Amendment or Exclusion): Relasi dengan amendment atau pengecualian polis
