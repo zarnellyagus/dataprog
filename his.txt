@@ -1,0 +1,375 @@
+using System;
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Caching.Memory;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Diagnostics;
+
+namespace SalesforcAPI.Repositories
+{
+    public class TransactionHistoryRepository : ITransactionHistoryRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<TransactionHistoryRepository> _logger;
+        private readonly IMemoryCache _cache;
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(5);
+
+        public TransactionHistoryRepository(
+            IConfiguration configuration,
+            ILogger<TransactionHistoryRepository> logger,
+            IMemoryCache cache)
+        {
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                ?? throw new ArgumentNullException(nameof(configuration), "Connection string NDIBOARD33 not found.");
+            _logger = logger;
+            _cache = cache;
+        }
+
+        public async Task<PagedResponse<TransactionHistoryResponse>?> GetTransactionHistoryAsync(
+            TransactionHistoryPagedRequest request)
+        {
+            var sw = Stopwatch.StartNew();
+
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(request.PolicyID))
+                throw new ArgumentException("PolicyID is required.", nameof(request.PolicyID));
+
+            var pageNumber = request.PageNumber <= 0 ? 1 : request.PageNumber;
+            var pageSize = request.PageSize <= 0 ? 10 : request.PageSize;
+            var offset = (pageNumber - 1) * pageSize;
+
+            var cacheKey = $"TxHistory_{request.PolicyID}_P{pageNumber}_S{pageSize}";
+
+            // Try cache first
+            if (_cache.TryGetValue<PagedResponse<TransactionHistoryResponse>>(cacheKey, out var cachedResult))
+            {
+                _logger.LogInformation("Cache HIT PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                return cachedResult;
+            }
+
+            try
+            {
+                using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                // 🔥 CRITICAL: Check if policy exists FIRST (0.3ms)
+                var policyExists = await CheckPolicyExistsAsync(connection, request.PolicyID);
+                if (!policyExists)
+                {
+                    sw.Stop();
+                    _logger.LogWarning("Policy NOT FOUND PolicyID={PolicyID} Time={Elapsed}ms",
+                        request.PolicyID, sw.ElapsedMilliseconds);
+                    return null; // Return null for 404 handling
+                }
+
+                // Execute optimized queries
+                var sql = BuildOptimizedQuery();
+                var param = new
+                {
+                    PolicyID = request.PolicyID,
+                    Offset = offset,
+                    PageSize = pageSize
+                };
+
+                using var multi = await connection.QueryMultipleAsync(sql, param, commandTimeout: 120);
+
+                var totalRecords = await multi.ReadSingleOrDefaultAsync<int>();
+                var withdrawal = (await multi.ReadAsync<WithdrawalSummary>()).ToList();
+                var switching = (await multi.ReadAsync<Switching>()).ToList();
+                var detailSwitching = (await multi.ReadAsync<DetailSwitching>()).ToList();
+
+                var totalPages = (int)Math.Ceiling(totalRecords / (double)pageSize);
+
+                var data = new TransactionHistoryResponse
+                {
+                    WithdrawalSummary = withdrawal,
+                    SwitchingTransactions = switching,
+                    DetailSwitching = detailSwitching
+                };
+
+                var result = new PagedResponse<TransactionHistoryResponse>
+                {
+                    Data = data,
+                    PageNumber = pageNumber,
+                    PageSize = pageSize,
+                    TotalRecords = totalRecords,
+                    TotalPages = totalPages
+                };
+
+                // Cache the result
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetSlidingExpiration(_cacheDuration)
+                    .SetAbsoluteExpiration(TimeSpan.FromMinutes(15))
+                    .SetPriority(CacheItemPriority.High);
+
+                _cache.Set(cacheKey, result, cacheOptions);
+
+                sw.Stop();
+                _logger.LogInformation(
+                    "TransactionHistory OK PolicyID={PolicyID} Records={Records} Time={Elapsed}ms",
+                    request.PolicyID, totalRecords, sw.ElapsedMilliseconds);
+
+                return result;
+            }
+            catch (SqlException sqlEx) when (sqlEx.Number == -2) // Timeout
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL TIMEOUT PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+
+                throw new TimeoutException(
+                    $"Database timeout for PolicyID '{request.PolicyID}'. Please try again or contact support.",
+                    sqlEx);
+            }
+            catch (SqlException sqlEx)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL Error PolicyID={PolicyID} ErrorCode={ErrorCode} Time={Elapsed}ms",
+                    request.PolicyID, sqlEx.Number, sw.ElapsedMilliseconds);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                _logger.LogError(ex,
+                    "Error GetTransactionHistoryAsync PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Check if policy exists (0.2-0.5ms with index)
+        /// </summary>
+        private async Task<bool> CheckPolicyExistsAsync(SqlConnection connection, string policyId)
+        {
+            const string sql = @"
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM DWM_POLICY WITH (NOLOCK)
+                    WHERE POL_ID = @PolicyID
+                ) THEN 1 ELSE 0 END";
+
+            try
+            {
+                return await connection.ExecuteScalarAsync<bool>(sql, new { PolicyID = policyId });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error checking policy existence PolicyID={PolicyID}", policyId);
+                return true; // Fail-safe: proceed with main query
+            }
+        }
+
+        /// <summary>
+        /// Build optimized query - FIXED parameter names
+        /// </summary>
+        private string BuildOptimizedQuery()
+        {
+            return @"
+-- Query 1: Count total CIA records
+SELECT COUNT(1)
+FROM DWT_CIA CIA WITH (NOLOCK)
+WHERE CIA.POL_ID = @PolicyID
+OPTION (MAXDOP 2);
+
+-- Query 2: Withdrawal Summary (paginated) - FIXED with ROW_NUMBER
+WITH RankedWithdrawals AS (
+    SELECT 
+        PL.POL_ID AS PolicyID,
+        CIA.CIA_FND_TRXN_AMT AS TotalWithdrawalAmount,
+        CIA.CIA_EFF_DT AS WithdrawalEffectiveDate,
+        DCC.CIA_ALLOC_DPOS_AMT AS TotalAmount,
+        ROW_NUMBER() OVER (
+            PARTITION BY PL.POL_ID 
+            ORDER BY CIA.CIA_EFF_DT DESC
+        ) AS RowNum
+    FROM DWM_POLICY PL WITH (NOLOCK)
+    LEFT JOIN DWT_CIA CIA WITH (NOLOCK) ON CIA.POL_ID = PL.POL_ID
+    LEFT JOIN DWT_CIA_COVERAGE DCC WITH (NOLOCK) 
+        ON DCC.POL_ID = PL.POL_ID 
+        AND DCC.CIA_ID = CIA.CIA_ID
+    WHERE PL.POL_ID = @PolicyID
+       
+)
+SELECT 
+    PolicyID,
+    TotalWithdrawalAmount,
+    WithdrawalEffectiveDate,
+    TotalAmount
+FROM RankedWithdrawals
+WHERE RowNum > @Offset AND RowNum <= (@Offset + @PageSize)
+ORDER BY WithdrawalEffectiveDate DESC
+OPTION (MAXDOP 2);
+
+-- Query 3: Switching Transactions (paginated)
+SELECT 
+    CIA.CIA_EFF_DT AS ActivityEffectiveDate,
+    CIA.CIA_TYP_CD AS ActivityType,
+    CIA.CIA_FND_TRXN_AMT AS NetAmount,
+    COALESCE(CIA.CIA_REVRS_PRCES_DT, '1900-01-01') AS EffectiveDateOfReversal
+FROM DWT_CIA CIA WITH (NOLOCK)
+WHERE CIA.POL_ID = @PolicyID
+ORDER BY CIA.CIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2, RECOMPILE);
+
+-- Query 4: Detail Switching (paginated)
+SELECT 
+    FA.FND_ID AS Fund,
+    ISNULL(FP.PURCH_PRIC_1_AMT, 0) AS UnitPrice,
+    ISNULL(FA.FIA_INTG_AUNIT_QTY, 0) AS NetUnitChange,
+    ISNULL(FA.CFN_INTG_AUNIT_QTY, 0) AS ApproximateNumberOfUnits,
+    CAST(0 AS DECIMAL(18,2)) AS FundAccumulationUnit
+FROM DWT_FIA FA WITH (NOLOCK)
+INNER JOIN DWT_FUND_UNIT_PRICE FP WITH (NOLOCK)
+    ON FP.FND_ID = FA.FND_ID 
+    AND FA.FIA_EFF_DT = FP.FNDVL_EFF_DT
+WHERE FA.POL_ID = @PolicyID
+ORDER BY FA.FIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2, RECOMPILE);";
+        }
+    }
+}
+
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Threading.Tasks;
+
+namespace SalesForceAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class TransactionHistoryController : ControllerBase
+    {
+        private readonly ITransactionHistoryRepository _repository;
+        private readonly ILogger<TransactionHistoryController> _logger;
+
+        public TransactionHistoryController(
+            ITransactionHistoryRepository repository,
+            ILogger<TransactionHistoryController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        [HttpPost]
+        [ResponseCache(Duration = 300, VaryByQueryKeys = new[] { "PolicyID", "PageNumber", "PageSize" })]
+        [ProducesResponseType(typeof(PagedResponse<TransactionHistoryResponse>), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status408RequestTimeout)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> Post([FromBody] TransactionHistoryPagedRequest request)
+        {
+            try
+            {
+                // Validation
+                if (request == null || string.IsNullOrWhiteSpace(request.PolicyID))
+                {
+                    _logger.LogWarning("TransactionHistory POST with invalid PolicyID");
+                    return BadRequest(new ErrorResponse
+                    {
+                        Success = false,
+                        ErrorCode = "INVALID_REQUEST",
+                        Message = "PolicyID is required and cannot be empty",
+                        Timestamp = DateTime.UtcNow
+                    });
+                }
+
+                _logger.LogInformation("Fetching transaction history for PolicyID={PolicyID} Page={Page}",
+                    request.PolicyID, request.PageNumber);
+
+                var result = await _repository.GetTransactionHistoryAsync(request);
+
+                // 🔥 Handle 404 - Policy not found
+                if (result == null)
+                {
+                    _logger.LogWarning("Policy NOT FOUND PolicyID={PolicyID}", request.PolicyID);
+                    return NotFound(new ErrorResponse
+                    {
+                        Success = false,
+                        ErrorCode = "POLICY_NOT_FOUND",
+                        Message = $"Policy with ID '{request.PolicyID}' does not exist in the system",
+                        Timestamp = DateTime.UtcNow
+                    });
+                }
+
+                _logger.LogInformation(
+                    "Transaction history retrieved successfully PolicyID={PolicyID} Records={Records}",
+                    request.PolicyID, result.TotalRecords);
+
+                return Ok(result);
+            }
+            catch (TimeoutException timeoutEx)
+            {
+                _logger.LogError(timeoutEx, "Timeout for PolicyID={PolicyID}", request?.PolicyID);
+                return StatusCode(StatusCodes.Status408RequestTimeout, new ErrorResponse
+                {
+                    Success = false,
+                    ErrorCode = "TIMEOUT_ERROR",
+                    Message = "Request timeout. Please verify the PolicyID and try again.",
+                    Timestamp = DateTime.UtcNow
+                });
+            }
+            catch (ArgumentException argEx)
+            {
+                _logger.LogWarning(argEx, "Validation error for PolicyID={PolicyID}", request?.PolicyID);
+                return BadRequest(new ErrorResponse
+                {
+                    Success = false,
+                    ErrorCode = "VALIDATION_ERROR",
+                    Message = argEx.Message,
+                    Timestamp = DateTime.UtcNow
+                });
+            }
+            catch (SqlException sqlEx)
+            {
+                _logger.LogError(sqlEx,
+                    "Database error for PolicyID={PolicyID} ErrorCode={ErrorCode}",
+                    request?.PolicyID, sqlEx.Number);
+
+                return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+                {
+                    Success = false,
+                    ErrorCode = $"DATABASE_ERROR_{sqlEx.Number}",
+                    Message = "A database error occurred. Please contact support if the issue persists.",
+                    Timestamp = DateTime.UtcNow
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error for PolicyID={PolicyID}", request?.PolicyID);
+                return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+                {
+                    Success = false,
+                    ErrorCode = "INTERNAL_ERROR",
+                    Message = "An unexpected error occurred while processing your request",
+                    Timestamp = DateTime.UtcNow
+                });
+            }
+        }
+    }
+}
+
+ public class ErrorResponse
+ {
+     public bool Success { get; set; }
+     public string ErrorCode { get; set; } = string.Empty;
+     public string Message { get; set; } = string.Empty;
+     public DateTime Timestamp { get; set; }
+ }
