@@ -1,0 +1,250 @@
+using System;
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Caching.Memory;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Diagnostics;
+
+namespace SalesforcAPI.Repositories
+{
+    public class TransactionHistoryRepository : ITransactionHistoryRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<TransactionHistoryRepository> _logger;
+        private readonly IMemoryCache _cache;
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(5);
+
+        public TransactionHistoryRepository(
+            IConfiguration configuration,
+            ILogger<TransactionHistoryRepository> logger,
+            IMemoryCache cache)
+        {
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                ?? throw new ArgumentNullException(nameof(configuration), "Connection string NDIBOARD33 not found.");
+            _logger = logger;
+            _cache = cache;
+        }
+
+        public async Task<PagedResponse<TransactionHistoryResponse>?> GetTransactionHistoryAsync(
+            TransactionHistoryPagedRequest request)
+        {
+            var sw = Stopwatch.StartNew();
+
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(request.PolicyID))
+                throw new ArgumentException("PolicyID is required.", nameof(request.PolicyID));
+
+            var pageNumber = request.PageNumber <= 0 ? 1 : request.PageNumber;
+            var pageSize = request.PageSize <= 0 ? 10 : request.PageSize;
+            var offset = (pageNumber - 1) * pageSize;
+
+            var cacheKey = $"TxHistory_{request.PolicyID}_P{pageNumber}_S{pageSize}";
+
+            // Try cache first
+            if (_cache.TryGetValue<PagedResponse<TransactionHistoryResponse>>(cacheKey, out var cachedResult))
+            {
+                _logger.LogInformation("Cache HIT PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                return cachedResult;
+            }
+
+            try
+            {
+                using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                // 🚀 SINGLE OPTIMIZED QUERY - Combines all operations
+                var sql = BuildUltraOptimizedQuery();
+                var param = new
+                {
+                    PolicyID = request.PolicyID,
+                    Offset = offset,
+                    PageSize = pageSize
+                };
+
+                using var multi = await connection.QueryMultipleAsync(sql, param, commandTimeout: 30);
+
+                // Policy existence check + count in one query
+                var policyCheck = await multi.ReadSingleOrDefaultAsync<PolicyCheckResult>();
+                
+                if (policyCheck == null || !policyCheck.PolicyExists)
+                {
+                    sw.Stop();
+                    _logger.LogWarning("Policy NOT FOUND PolicyID={PolicyID} Time={Elapsed}ms",
+                        request.PolicyID, sw.ElapsedMilliseconds);
+                    return null;
+                }
+
+                var totalRecords = policyCheck.TotalRecords;
+
+                // Read all data sets
+                var withdrawal = (await multi.ReadAsync<WithdrawalSummary>()).ToList();
+                var switching = (await multi.ReadAsync<Switching>()).ToList();
+                var detailSwitching = (await multi.ReadAsync<DetailSwitching>()).ToList();
+
+                var totalPages = (int)Math.Ceiling(totalRecords / (double)pageSize);
+
+                var data = new TransactionHistoryResponse
+                {
+                    WithdrawalSummary = withdrawal,
+                    SwitchingTransactions = switching,
+                    DetailSwitching = detailSwitching
+                };
+
+                var result = new PagedResponse<TransactionHistoryResponse>
+                {
+                    Data = data,
+                    PageNumber = pageNumber,
+                    PageSize = pageSize,
+                    TotalRecords = totalRecords,
+                    TotalPages = totalPages
+                };
+
+                // Cache the result
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetSlidingExpiration(_cacheDuration)
+                    .SetAbsoluteExpiration(TimeSpan.FromMinutes(15))
+                    .SetPriority(CacheItemPriority.High);
+
+                _cache.Set(cacheKey, result, cacheOptions);
+
+                sw.Stop();
+                _logger.LogInformation(
+                    "TransactionHistory OK PolicyID={PolicyID} Records={Records} Time={Elapsed}ms",
+                    request.PolicyID, totalRecords, sw.ElapsedMilliseconds);
+
+                return result;
+            }
+            catch (SqlException sqlEx) when (sqlEx.Number == -2)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL TIMEOUT PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+
+                throw new TimeoutException(
+                    $"Database timeout for PolicyID '{request.PolicyID}'. Please try again or contact support.",
+                    sqlEx);
+            }
+            catch (SqlException sqlEx)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL Error PolicyID={PolicyID} ErrorCode={ErrorCode} Time={Elapsed}ms",
+                    request.PolicyID, sqlEx.Number, sw.ElapsedMilliseconds);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                _logger.LogError(ex,
+                    "Error GetTransactionHistoryAsync PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ultra-optimized single query batch
+        /// Eliminates redundant JOINs and uses OFFSET/FETCH directly
+        /// </summary>
+        private string BuildUltraOptimizedQuery()
+        {
+            return @"
+-- Query 1: Check policy existence + Count CIA records in ONE query
+SELECT 
+    CASE WHEN EXISTS (SELECT 1 FROM DWM_POLICY WITH (READUNCOMMITTED, INDEX(IX_POL_ID)) WHERE POL_ID = @PolicyID) 
+         THEN CAST(1 AS BIT) 
+         ELSE CAST(0 AS BIT) 
+    END AS PolicyExists,
+    (SELECT COUNT(1) FROM DWT_CIA WITH (READUNCOMMITTED, INDEX(IX_CIA_POL_ID)) WHERE POL_ID = @PolicyID) AS TotalRecords
+OPTION (MAXDOP 1, RECOMPILE);
+
+-- Query 2: Withdrawal Summary (Direct OFFSET/FETCH - NO ROW_NUMBER)
+SELECT TOP (@PageSize)
+    @PolicyID AS PolicyID,
+    CIA.CIA_FND_TRXN_AMT AS TotalWithdrawalAmount,
+    CIA.CIA_EFF_DT AS WithdrawalEffectiveDate,
+    ISNULL(DCC.CIA_ALLOC_DPOS_AMT, 0) AS TotalAmount
+FROM DWT_CIA CIA WITH (READUNCOMMITTED, INDEX(IX_CIA_POL_EFF_DT))
+LEFT JOIN DWT_CIA_COVERAGE DCC WITH (READUNCOMMITTED, INDEX(IX_DCC_POL_CIA))
+    ON DCC.POL_ID = CIA.POL_ID AND DCC.CIA_ID = CIA.CIA_ID
+WHERE CIA.POL_ID = @PolicyID
+ORDER BY CIA.CIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 1, OPTIMIZE FOR (@PageSize = 10));
+
+-- Query 3: Switching Transactions (Optimized with specific index)
+SELECT 
+    CIA.CIA_EFF_DT AS ActivityEffectiveDate,
+    CIA.CIA_TYP_CD AS ActivityType,
+    CIA.CIA_FND_TRXN_AMT AS NetAmount,
+    ISNULL(CIA.CIA_REVRS_PRCES_DT, '1900-01-01') AS EffectiveDateOfReversal
+FROM DWT_CIA CIA WITH (READUNCOMMITTED, INDEX(IX_CIA_POL_EFF_DT))
+WHERE CIA.POL_ID = @PolicyID
+ORDER BY CIA.CIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 1, OPTIMIZE FOR (@PageSize = 10));
+
+-- Query 4: Detail Switching (Optimized with index hints)
+SELECT 
+    FA.FND_ID AS Fund,
+    ISNULL(FP.PURCH_PRIC_1_AMT, 0) AS UnitPrice,
+    ISNULL(FA.FIA_INTG_AUNIT_QTY, 0) AS NetUnitChange,
+    ISNULL(FA.CFN_INTG_AUNIT_QTY, 0) AS ApproximateNumberOfUnits,
+    CAST(0 AS DECIMAL(18,2)) AS FundAccumulationUnit
+FROM DWT_FIA FA WITH (READUNCOMMITTED, INDEX(IX_FIA_POL_EFF_DT))
+INNER JOIN DWT_FUND_UNIT_PRICE FP WITH (READUNCOMMITTED, INDEX(IX_FP_FND_EFF_DT))
+    ON FP.FND_ID = FA.FND_ID AND FA.FIA_EFF_DT = FP.FNDVL_EFF_DT
+WHERE FA.POL_ID = @PolicyID
+ORDER BY FA.FIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 1, OPTIMIZE FOR (@PageSize = 10));";
+        }
+
+        // Helper class for combined policy check
+        private class PolicyCheckResult
+        {
+            public bool PolicyExists { get; set; }
+            public int TotalRecords { get; set; }
+        }
+    }
+}
+
+
+-- Critical indexes untuk performa <20ms
+CREATE NONCLUSTERED INDEX IX_POL_ID 
+ON DWM_POLICY(POL_ID) 
+INCLUDE (POL_STATUS) -- jika ada kolom status
+WITH (FILLFACTOR = 95, ONLINE = ON);
+
+CREATE NONCLUSTERED INDEX IX_CIA_POL_ID 
+ON DWT_CIA(POL_ID) 
+INCLUDE (CIA_ID, CIA_FND_TRXN_AMT, CIA_EFF_DT, CIA_TYP_CD, CIA_REVRS_PRCES_DT)
+WITH (FILLFACTOR = 90, ONLINE = ON);
+
+CREATE NONCLUSTERED INDEX IX_CIA_POL_EFF_DT 
+ON DWT_CIA(POL_ID, CIA_EFF_DT DESC) 
+INCLUDE (CIA_ID, CIA_FND_TRXN_AMT, CIA_TYP_CD, CIA_REVRS_PRCES_DT)
+WITH (FILLFACTOR = 90, ONLINE = ON);
+
+CREATE NONCLUSTERED INDEX IX_DCC_POL_CIA 
+ON DWT_CIA_COVERAGE(POL_ID, CIA_ID) 
+INCLUDE (CIA_ALLOC_DPOS_AMT)
+WITH (FILLFACTOR = 90, ONLINE = ON);
+
+CREATE NONCLUSTERED INDEX IX_FIA_POL_EFF_DT 
+ON DWT_FIA(POL_ID, FIA_EFF_DT DESC) 
+INCLUDE (FND_ID, FIA_INTG_AUNIT_QTY, CFN_INTG_AUNIT_QTY)
+WITH (FILLFACTOR = 90, ONLINE = ON);
+
+CREATE NONCLUSTERED INDEX IX_FP_FND_EFF_DT 
+ON DWT_FUND_UNIT_PRICE(FND_ID, FNDVL_EFF_DT) 
+INCLUDE (PURCH_PRIC_1_AMT)
+WITH (FILLFACTOR = 95, ONLINE = ON);
