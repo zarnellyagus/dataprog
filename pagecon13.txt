@@ -1,0 +1,197 @@
+<div class="policy-detail-page" *ngIf="policyId">
+  <!-- Header -->
+  <div class="page-header mb-3">
+    <h2 class="h5 mb-1">Policy Detail</h2>
+    <p class="text-muted mb-0">
+      Informasi lengkap untuk policy <strong>{{ policyId }}</strong>
+    </p>
+  </div>
+
+  <!-- Detail Card -->
+  <div class="card mb-3">
+    <div class="card-header bg-light">
+      <h5 class="card-title mb-0">Informasi Policy</h5>
+    </div>
+    <div class="card-body" *ngIf="!isLoadingDetail; else loadingDetailTpl">
+      <div *ngIf="policyDetail; else noDetailTpl">
+        <div class="row mb-2">
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Policy No</label>
+            <div class="fw-semibold">{{ policyDetail.policyNo }}</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">SPA J No</label>
+            <div>{{ policyDetail.spajNo }}</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Client ID</label>
+            <div>{{ policyDetail.clientID }}</div>
+          </div>
+        </div>
+
+        <div class="row mb-2">
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Owner Name</label>
+            <div>{{ policyDetail.ownerName }}</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Insured Name</label>
+            <div>{{ policyDetail.insuredName }}</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Plan</label>
+            <div>{{ policyDetail.planName }}</div>
+          </div>
+        </div>
+
+        <div class="row mb-2">
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Issued Date</label>
+            <div>{{ formatDate(policyDetail.issuedDate) }}</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Agent</label>
+            <div>{{ policyDetail.agentId }}</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Branch</label>
+            <div>{{ policyDetail.branchName }}</div>
+          </div>
+        </div>
+
+        <div class="row mb-2">
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Email</label>
+            <div>{{ policyDetail.email || '-' }}</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">Telepon</label>
+            <div>{{ policyDetail.tlpNum || '-' }}</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted mb-0">TTP</label>
+            <div>{{ policyDetail.ttp }} ({{ policyDetail.receiveDate }})</div>
+          </div>
+        </div>
+
+        <div class="row mb-0">
+          <div class="col-12">
+            <label class="form-label small text-muted mb-0">Alamat</label>
+            <div>{{ policyDetail.addressName || '-' }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status E-Policy -->
+  <div class="card mb-3">
+    <div class="card-header bg-light d-flex justify-content-between align-items-center">
+      <h5 class="card-title mb-0">Status E-Policy</h5>
+      <span class="badge bg-secondary" *ngIf="ePolicyStatuses.length">
+        {{ ePolicyStatuses.length }} status
+      </span>
+    </div>
+
+    <div class="card-body p-0" *ngIf="!isLoadingStatus; else loadingStatusTpl">
+      <div *ngIf="ePolicyStatuses.length; else noStatusTpl" class="table-responsive">
+        <table class="table table-sm mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Source</th>
+              <th>Status Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let s of ePolicyStatuses">
+              <td>{{ s.ePolSource || (s as any).EPolSource }}</td>
+              <td>{{ formatDate(s.statusDate || (s as any).StatusDate, 'dd/MM/yyyy HH:mm') }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Policy Summary (Delivery History) -->
+  <div class="card">
+    <div class="card-header bg-light d-flex justify-content-between align-items-center">
+      <h5 class="card-title mb-0">Delivery / Summary</h5>
+      <span class="badge bg-secondary" *ngIf="policySummaries.length">
+        {{ policySummaries.length }} records
+      </span>
+    </div>
+
+    <div class="card-body p-0" *ngIf="!isLoadingSummary; else loadingSummaryTpl">
+      <div *ngIf="policySummaries.length; else noSummaryTpl" class="table-responsive">
+        <table class="table table-sm mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Pickup Date</th>
+              <th>Status Date</th>
+              <th>Status</th>
+              <th>Receiver</th>
+              <th>Relation</th>
+              <th>Return</th>
+              <th>Resi No</th>
+              <th>Courier</th>
+            </tr>
+          </thead>
+          <tbody>
+          <tr *ngFor="let s of policySummaries">
+  <td>{{ formatDate(s.polSumPickUpDate) }}</td>
+  <td>{{ formatDate(s.polSumStatusDate) }}</td>
+  <td>{{ s.polSumStatus }}</td>
+  <td>{{ s.polSumReceiver }}</td>
+  <td>{{ s.polSumRelation }}</td>
+  <td>{{ s.polSumReturn }}</td>
+  <td>{{ s.polSumResiNo }}</td>
+  <td>{{ s.polSumCourier }}</td>
+</tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading templates -->
+  <ng-template #loadingDetailTpl>
+    <div class="p-4 text-center text-muted">
+      <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
+      Memuat detail policy...
+    </div>
+  </ng-template>
+
+  <ng-template #loadingStatusTpl>
+    <div class="p-3 text-center text-muted">
+      <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
+      Memuat status e‑policy...
+    </div>
+  </ng-template>
+
+  <ng-template #loadingSummaryTpl>
+    <div class="p-3 text-center text-muted">
+      <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
+      Memuat summary pengiriman...
+    </div>
+  </ng-template>
+
+  <!-- Empty templates -->
+  <ng-template #noDetailTpl>
+    <div class="p-3 text-center text-muted">
+      Detail policy tidak ditemukan.
+    </div>
+  </ng-template>
+
+  <ng-template #noStatusTpl>
+    <div class="p-3 text-center text-muted">
+      Tidak ada status e‑policy.
+    </div>
+  </ng-template>
+
+  <ng-template #noSummaryTpl>
+    <div class="p-3 text-center text-muted">
+      Tidak ada riwayat pengiriman.
+    </div>
+  </ng-template>
+</div>
