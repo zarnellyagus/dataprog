@@ -1,0 +1,290 @@
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.OpenApi.Models;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Repositories;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNamingPolicy = null;
+        options.JsonSerializerOptions.DefaultIgnoreCondition =
+            System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
+    });
+
+// Memory cache
+builder.Services.AddMemoryCache();
+
+// Response caching
+builder.Services.AddResponseCaching(options =>
+{
+    options.SizeLimit = 1024;
+});
+
+// Rate limiting per token (Authorization header)
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy("PerTokenPolicy", context =>
+    {
+        var authHeader = context.Request.Headers["Authorization"].ToString();
+        var tokenKey = string.IsNullOrWhiteSpace(authHeader) ? "anonymous" : authHeader;
+
+        return RateLimitPartition.GetTokenBucketLimiter(
+            tokenKey,
+            _ => new TokenBucketRateLimiterOptions
+            {
+                TokenLimit = 10,                           // max burst per 10s
+                TokensPerPeriod = 10,                      // refill
+                ReplenishmentPeriod = TimeSpan.FromSeconds(10),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0,                            // langsung 429
+                AutoReplenishment = true
+            });
+    });
+
+    options.OnRejected = async (context, token) =>
+    {
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.HttpContext.Response.ContentType = "application/json";
+
+        await context.HttpContext.Response.WriteAsync("""
+        {
+          "success": false,
+          "errorCode": "RATE_LIMIT_EXCEEDED",
+          "message": "Too many requests for this token. Please try again later."
+        }
+        """, token);
+    };
+});
+
+// Register repositories (lengkapi tipe konkretnya sesuai project Anda)
+builder.Services.AddScoped<IPolicyDetailsRepository, PolicyDetailsRepository>();
+builder.Services.AddScoped<ITransactionHistoryRepository, TransactionHistoryRepository>();
+builder.Services.AddScoped<IValueInformationRepository, ValueInformationRepository>();
+builder.Services.AddScoped<IBenefitInformationRepository, BenefitInformationRepository>();
+builder.Services.AddScoped<IFundIquiryActifityRepository, FundIquiryActifityRepository>();
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "Policy Details API",
+        Version = "v1",
+        Description = "API for retrieving policy and beneficiary details"
+    });
+});
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll",
+        policy => policy
+            .AllowAnyOrigin()
+            .AllowAnyMethod()
+            .AllowAnyHeader());
+});
+
+var app = builder.Build();
+
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Policy Details API V1");
+    c.RoutePrefix = "swagger";
+});
+
+app.UseCors("AllowAll");
+
+// Response caching
+app.UseResponseCaching();
+
+// Rate limiting
+app.UseRateLimiter();
+
+app.UseHttpsRedirection();
+
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();
+
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Data.SqlClient;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Threading.Tasks;
+
+namespace SalesForceAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    [EnableRateLimiting("PerTokenPolicy")] // 🔒 penjagaan per token
+    public class DetailsController : ControllerBase
+    {
+        private readonly IPolicyDetailsRepository _repository;
+        private readonly ILogger<DetailsController> _logger;
+
+        public DetailsController(
+            IPolicyDetailsRepository repository,
+            ILogger<DetailsController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        // ... isi GetPolicyDetails tetap seperti file Anda ...
+    }
+}
+
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Threading.Tasks;
+
+namespace SalesForceAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    [EnableRateLimiting("PerTokenPolicy")] // 🔒
+    public class TransactionHistoryController : ControllerBase
+    {
+        private readonly ITransactionHistoryRepository _repository;
+        private readonly ILogger<TransactionHistoryController> _logger;
+
+        public TransactionHistoryController(
+            ITransactionHistoryRepository repository,
+            ILogger<TransactionHistoryController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        // ... isi Post tetap seperti file Anda ...
+    }
+}
+
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Threading.Tasks;
+
+namespace SalesForceAPI.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    [Produces("application/json")]
+    [EnableRateLimiting("PerTokenPolicy")] // 🔒
+    public class FundIquiryActifityController : ControllerBase
+    {
+        private readonly IFundIquiryActifityRepository _repository;
+        private readonly ILogger<FundIquiryActifityController> _logger;
+
+        public FundIquiryActifityController(
+            IFundIquiryActifityRepository repository,
+            ILogger<FundIquiryActifityController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        // ... isi GET & POST tetap seperti file Anda ...
+    }
+}
+
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Threading.Tasks;
+
+namespace SalesForceAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    [EnableRateLimiting("PerTokenPolicy")] // 🔒
+    public class BenefitInformationController : ControllerBase
+    {
+        private readonly IBenefitInformationRepository _repository;
+        private readonly ILogger<BenefitInformationController> _logger;
+
+        public BenefitInformationController(
+            IBenefitInformationRepository repository,
+            ILogger<BenefitInformationController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        // ... isi Post tetap seperti file Anda ...
+    }
+}
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using SalesforcAPI.Interfaces;
+using Microsoft.Extensions.Logging;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace SalesforcAPI.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    [EnableRateLimiting("PerTokenPolicy")] // 🔒
+    public class ValueInformationController : ControllerBase
+    {
+        private readonly IValueInformationRepository _repository;
+        private readonly ILogger<ValueInformationController> _logger;
+
+        public ValueInformationController(
+            IValueInformationRepository repository,
+            ILogger<ValueInformationController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        // ... isi GetValueInformation, PolicyExists, batch tetap ...
+    }
+}
+
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+
+namespace SalesforcAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    [EnableRateLimiting("PerTokenPolicy")] // 🔒
+    public class AnticipatedEndowmentController : ControllerBase
+    {
+        // tambahkan action di sini kalau sudah ada implementasinya
+    }
+}
+
+
