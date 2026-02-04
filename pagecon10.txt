@@ -1,0 +1,268 @@
+import { Component, OnInit } from '@angular/core';
+import { FormBuilder, FormGroup } from '@angular/forms';
+import { Router } from '@angular/router';
+import { DatePipe } from '@angular/common';
+import {
+  PolicyService,
+  ConsolidatePolicy,
+  PagedResult
+} from '../services/policy.service';
+
+@Component({
+  selector: 'app-consolidate-policy',
+  standalone: false,
+  templateUrl: './consolidate-policy.component.html',
+  styleUrls: ['./consolidate-policy.component.scss']
+})
+export class ConsolidatePolicyComponent implements OnInit {
+  searchForm: FormGroup;
+  policies: ConsolidatePolicy[] = [];
+
+  currentPage = 1;
+  pageSize = 10;
+  totalCount = 0;
+  totalPages = 0;
+
+  isLoading = false;
+
+  constructor(
+    private formBuilder: FormBuilder,
+    private policyService: PolicyService,
+    private router: Router,
+    private datePipe: DatePipe
+  ) {
+    this.searchForm = this.formBuilder.group({
+      policyId: [''],
+      appNo: ['']
+    });
+  }
+
+  ngOnInit(): void {
+    console.log('🌐 ConsolidatePolicy loaded');
+    this.loadData();
+  }
+
+  trackByPolicyId(index: number, item: ConsolidatePolicy): any {
+    return item.policyID || index;
+  }
+
+  loadData(): void {
+    this.isLoading = true;
+    console.log('📊 Loading page:', this.currentPage, 'search:', this.searchForm.value);
+
+    const formValues = this.searchForm.value;
+
+    this.policyService.getConsolidatePolicy(
+      formValues.policyId || undefined,
+      formValues.appNo || undefined,
+      this.currentPage,
+      this.pageSize
+    ).subscribe({
+      next: (response: PagedResult<ConsolidatePolicy>) => {
+        console.log('✅ API Response:', response);
+
+        // Jika JSON sudah camelCase (data, totalRecords, totalPages)
+        this.policies   = response.data;
+        this.totalCount = response.totalRecords;
+        this.totalPages = response.totalPages;
+
+        // Kalau JSON Anda masih PascalCase (Data, TotalRecords, TotalPages),
+        // ganti 3 baris di atas dengan:
+        // this.policies   = (response as any).Data;
+        // this.totalCount = (response as any).TotalRecords;
+        // this.totalPages = (response as any).TotalPages;
+
+        console.log('📈 Pagination:', {
+          currentPage: this.currentPage,
+          totalPages: this.totalPages,
+          totalCount: this.totalCount,
+          pageNumbers: this.getPageNumbers()
+        });
+
+        this.isLoading = false;
+      },
+      error: (error) => {
+        console.error('❌ Error loading data:', error);
+        this.policies = [];
+        this.totalCount = 0;
+        this.totalPages = 0;
+        this.isLoading = false;
+      }
+    });
+  }
+
+  onSearch(): void {
+    this.currentPage = 1;
+    this.loadData();
+  }
+
+  onReset(): void {
+    this.searchForm.reset();
+    this.currentPage = 1;
+    this.loadData();
+  }
+
+  onPageSizeChange(): void {
+    this.currentPage = 1;
+    this.loadData();
+  }
+
+  getPageNumbers(): number[] {
+    const pages: number[] = [];
+
+    if (this.totalPages < 1) {
+      return pages;
+    }
+
+    const maxVisible = 5;
+    let startPage = Math.max(1, this.currentPage - Math.floor(maxVisible / 2));
+    let endPage   = Math.min(this.totalPages, startPage + maxVisible - 1);
+
+    if (endPage - startPage + 1 < maxVisible) {
+      startPage = Math.max(1, endPage - maxVisible + 1);
+    }
+
+    for (let i = startPage; i <= endPage; i++) {
+      pages.push(i);
+    }
+
+    console.log('📄 Page numbers generated:', pages);
+    return pages;
+  }
+
+  goToPage(page: number): void {
+    console.log('🔄 Go to page:', page);
+
+    if (page >= 1 && page <= this.totalPages && page !== this.currentPage) {
+      this.currentPage = page;
+      this.loadData();
+    }
+  }
+
+  viewPolicyDetail(policyId: string): void {
+    console.log('👁️ View detail:', policyId);
+    this.router.navigate(['/policy-detail', policyId]);
+  }
+
+  formatDate(date: any): string {
+    if (!date) return '-';
+    return this.datePipe.transform(date, 'dd/MM/yyyy') || '-';
+  }
+}
+
+
+
+
+import { Injectable } from '@angular/core';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { Observable } from 'rxjs';
+
+/** Model hasil consolidate policy (list) */
+export interface ConsolidatePolicy {
+  companyID: string;
+  policyID: string;
+  appNo: string;
+  ownerName: string;
+  issuedDate: string; // ISO string dari backend
+}
+
+/** Model hasil detail policy (bisa disesuaikan dengan PolicyDetail C#) */
+export interface PolicyDetail {
+  spajNo: string;
+  policyNo: string;
+  clientID: string;
+  ownerName: string;
+  insuredName: string;
+  planName: string;
+  issuedDate: string;
+  agentId: string;
+  branchName: string;
+  addressName: string;
+  email: string;
+  tlpNum: string;
+  ttp: string;
+  receiveDate: string;
+}
+
+/** PagedResult<T> versi Angular – menyesuaikan JSON camelCase */
+export interface PagedResult<T> {
+  data: T[];
+  totalRecords: number;
+  pageNumber: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+/** Status e-policy */
+export interface EPolicyStatus {
+  ePolSource: string;   // EPolSource di C# → ePolSource di JSON camelCase
+  statusDate: string;   // StatusDate → statusDate
+}
+
+/** Riwayat pengiriman fisik policy */
+export interface PolicySummary {
+  polSumPolicyID: string;
+  polSumPickUpDate: string;
+  polSumStatusDate: string;
+  polSumStatus: string;
+  polSumReceiver: string;
+  polSumRelation: string;
+  polSumReturn: string;
+  polSumResiNo: string;
+  polSumCourier: string;
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class PolicyService {
+  private apiUrl = 'https://localhost:7147/api';
+
+  constructor(private http: HttpClient) {}
+
+  /** GET /api/policy/consolidate */
+  getConsolidatePolicy(
+    policyId: string | undefined,
+    appNo: string | undefined,
+    pageNumber: number,
+    pageSize: number
+  ): Observable<PagedResult<ConsolidatePolicy>> {
+
+    let params = new HttpParams()
+      .set('pageNumber', pageNumber)
+      .set('pageSize', pageSize);
+
+    if (policyId) {
+      params = params.set('policyId', policyId);
+    }
+    if (appNo) {
+      params = params.set('appNo', appNo);
+    }
+
+    return this.http.get<PagedResult<ConsolidatePolicy>>(
+      `${this.apiUrl}/policy/consolidate`,
+      { params }
+    );
+  }
+
+  /** GET /api/policy/detail/{policyId} */
+  getPolicyDetail(policyId: string): Observable<PolicyDetail> {
+    return this.http.get<PolicyDetail>(
+      `${this.apiUrl}/policy/detail/${policyId}`
+    );
+  }
+
+  /** GET /api/policy/epolicy-status/{policyId} */
+  getEpolicy(policyId: string): Observable<EPolicyStatus[]> {
+    return this.http.get<EPolicyStatus[]>(
+      `${this.apiUrl}/policy/epolicy-status/${policyId}`
+    );
+  }
+
+  /** GET /api/policy/summary/{policyId} */
+  getPolicySummary(policyId: string): Observable<PolicySummary[]> {
+    return this.http.get<PolicySummary[]>(
+      `${this.apiUrl}/policy/summary/${policyId}`
+    );
+  }
+}
