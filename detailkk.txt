@@ -1,0 +1,359 @@
+CREATE NONCLUSTERED INDEX IX_DWM_POLICY_POLID
+ON DWM_POLICY (POL_ID);
+
+CREATE NONCLUSTERED INDEX IX_DWA_POLICY_CLIENT_POLID
+ON DWA_POLICY_CLIENT (POL_ID);
+
+CREATE NONCLUSTERED INDEX IX_DWM_COVERAGE_POLID
+ON DWM_COVERAGE (POL_ID);
+
+CREATE NONCLUSTERED INDEX IX_DWA_POLICY_BENEFICIARY_POLID
+ON DWA_POLICY_BENEFICIARY (POL_ID);
+
+CREATE NONCLUSTERED INDEX IX_DWM_TUHCO_POLID_PREVUPDT
+ON DWM_TUHCO (POL_ID, PREV_UPDT_TS);
+
+
+
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace SalesforcAPI.Repositories
+{
+    /// <summary>
+    /// PolicyDetailsRepository - High Performance (Target: <15–20ms)
+    /// Optimized multi-query with caching and proper error handling
+    /// </summary>
+    public class PolicyDetailsRepository : IPolicyDetailsRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<PolicyDetailsRepository> _logger;
+        private readonly IMemoryCache _cache;
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(10);
+
+        public PolicyDetailsRepository(
+            IConfiguration configuration,
+            ILogger<PolicyDetailsRepository> logger,
+            IMemoryCache cache)
+        {
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                ?? throw new ArgumentNullException(nameof(configuration), "Connection string NDIBOARD33 not found.");
+            _logger = logger;
+            _cache = cache;
+        }
+
+        public async Task<PolicyDetailsResponse?> GetPolicyDetailsAsync(string policyId)
+        {
+            var sw = Stopwatch.StartNew();
+
+            if (string.IsNullOrWhiteSpace(policyId))
+                throw new ArgumentException("PolicyID cannot be null or empty", nameof(policyId));
+
+            var cacheKey = $"PolicyDetails_{policyId}";
+
+            // ⚡ Cache check (sub-millisecond)
+            if (_cache.TryGetValue<PolicyDetailsResponse>(cacheKey, out var cachedResult))
+            {
+                _logger.LogInformation(
+                    "Cache HIT PolicyID={PolicyID} Time={Elapsed}ms",
+                    policyId, sw.ElapsedMilliseconds);
+                return cachedResult;
+            }
+
+            try
+            {
+                using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                var sql = BuildOptimizedQuery();
+
+                _logger.LogDebug("Executing multi-query for PolicyID={PolicyID}", policyId);
+
+                using var multi = await connection.QueryMultipleAsync(
+                    sql,
+                    new { PolicyID = policyId },
+                    commandTimeout: 60); // cukup 60 detik
+
+                var response = new PolicyDetailsResponse();
+
+                try
+                {
+                    // Query 1: Main Policy Details
+                    response.DetailsInformation =
+                        await multi.ReadFirstOrDefaultAsync<PolicyInfo>();
+
+                    // Query 2: Universal Life Coverage
+                    response.UniversalLifeCoverageInformation =
+                        (await multi.ReadAsync<UniversalLifeCoverageInfo>()).ToList();
+
+                    // Query 3: Beneficiary Information
+                    response.BeneficiaryInformation =
+                        (await multi.ReadAsync<BeneficiaryInfo>()).ToList();
+
+                    // Query 4: Billing Information
+                    response.BillingInfo =
+                        (await multi.ReadAsync<BillingInformation>()).ToList();
+
+                    // Query 5: Current Payor DDA
+                    response.CurrentPayorDDARelation =
+                        (await multi.ReadAsync<CurrentPayorDDARelationships>()).ToList();
+
+                    // Query 6: Restrict Billing
+                    response.RestrictBillingInfo =
+                        (await multi.ReadAsync<RestrictBilling>()).ToList();
+
+                    // Query 7: Servicing Agent
+                    response.ServicingAgentInformation =
+                        (await multi.ReadAsync<ServicingAgentInfo>()).ToList();
+
+                    // Query 8: Writing Agent
+                    response.WritingAgentInformation =
+                        (await multi.ReadAsync<WritingAgentInfo>()).ToList();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Failed to map query results PolicyID={PolicyID}",
+                        policyId);
+                    throw new InvalidOperationException(
+                        "Data mapping error. SQL column names may not match model properties.", ex);
+                }
+
+                // Kalau main detail tidak ada → anggap policy tidak ditemukan
+                if (response.DetailsInformation == null)
+                {
+                    sw.Stop();
+                    _logger.LogWarning(
+                        "Policy data not found PolicyID={PolicyID} Time={Elapsed}ms",
+                        policyId, sw.ElapsedMilliseconds);
+                    return null;
+                }
+
+                // Cache successful result
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetSlidingExpiration(_cacheDuration)
+                    .SetAbsoluteExpiration(TimeSpan.FromMinutes(30))
+                    .SetPriority(CacheItemPriority.High);
+
+                _cache.Set(cacheKey, response, cacheOptions);
+
+                sw.Stop();
+                _logger.LogInformation(
+                    "PolicyDetails OK PolicyID={PolicyID} Time={Elapsed}ms Beneficiaries={BenefCount} Coverage={CoverageCount}",
+                    policyId, sw.ElapsedMilliseconds,
+                    response.BeneficiaryInformation?.Count ?? 0,
+                    response.UniversalLifeCoverageInformation?.Count ?? 0);
+
+                return response;
+            }
+            catch (SqlException sqlEx) when (sqlEx.Number == -2)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL TIMEOUT PolicyID={PolicyID} Time={Elapsed}ms",
+                    policyId, sw.ElapsedMilliseconds);
+                throw new TimeoutException($"Database timeout for PolicyID '{policyId}'", sqlEx);
+            }
+            catch (InvalidOperationException)
+            {
+                throw; // mapping error
+            }
+            catch (SqlException sqlEx)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL ERROR PolicyID={PolicyID} ErrorCode={ErrorCode} LineNumber={LineNumber} Time={Elapsed}ms",
+                    policyId, sqlEx.Number, sqlEx.LineNumber, sw.ElapsedMilliseconds);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                _logger.LogError(ex,
+                    "UNEXPECTED ERROR PolicyID={PolicyID} Type={ExceptionType} Time={Elapsed}ms",
+                    policyId, ex.GetType().Name, sw.ElapsedMilliseconds);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Build optimized multi-query with proper column mapping
+        /// </summary>
+        private string BuildOptimizedQuery()
+        {
+            return @"
+-- Query 1: Main Policy Details Information
+SELECT DISTINCT
+    A.CO_ID AS Company,
+    A.POL_ID AS PolicyID,
+    ISNULL(A.PLAN_ID, '') AS PlanID,
+    A.POL_ISS_EFF_DT AS IssueDate,
+    ISNULL(A.POL_FREE_LK_END_DT, '1900-01-01') AS EndofFreeLookDate,
+    ISNULL(PT.CLI_ID, '') AS OwnerID,
+    ISNULL(CONCAT(CI.CLI_GIV_NM, ' ', CI.CLI_SUR_NM), '') AS OwnerName,
+    ISNULL(C.CLI_BTH_DT, '1900-01-01') AS OwnerDateofBirth,
+    ISNULL(B.CVG_SEX_CD, '') AS OwnerGender,
+    ISNULL(A.POL_CSTAT_CD, '') AS CurrentPolicyStatus,
+    ISNULL(B.COMIT_PERI_END_DT, '1900-01-01') AS Committeinperiod,
+    ISNULL(A.INS_CLI_ID, '') AS Clientid,
+    ISNULL(CONCAT(CI.CLI_GIV_NM, ' ', CI.CLI_SUR_NM), '') AS InsuredName,
+    ISNULL(C.CLI_BTH_DT, '1900-01-01') AS InsuredBirthDate,
+    ISNULL(C.CLI_ID_TYP_CD, '') AS IdeType,
+    ISNULL(C.CLI_ID_TXT, '') AS IdNo,
+    ISNULL(pc.CP, '') AS CellularPhone,
+    ISNULL(pc.EM, '') AS Email,
+    ISNULL(pc.BU, '') AS Business,
+    ISNULL(pc.HO, '') AS ContactNoHome,
+    ISNULL(pc.ER, '') AS Emergency,
+    ISNULL(A.POL_CRCY_CD, '') AS Currency,
+    ISNULL(A.POL_SNDRY_AMT, 0) AS SundryAmount,
+    A.POL_BILL_TO_DT_NUM AS BilltoDate,
+    ISNULL(A.POL_BILL_TYP_CD, '') AS BillingType,
+    ISNULL(CC.CRC_TYP_CD, '') AS CreditCardType,
+    ISNULL(CC.CRC_ID, '') AS CreditCardNumber,
+    ISNULL(CR.CRC_HLDR_NM, '') AS CreditCardHolderName,
+    CASE 
+        WHEN CR.CRC_XPRY_YR IS NOT NULL AND CR.CRC_XPRY_MO IS NOT NULL
+        THEN CONCAT(CR.CRC_XPRY_YR, '/', RIGHT('0' + CAST(CR.CRC_XPRY_MO AS VARCHAR), 2))
+        ELSE ''
+    END AS ExpiryMonthYear,
+    ISNULL(A.POL_TRU_PREM_AMT, 0) AS TruePremium,
+    A.POL_PD_TO_DT_NUM AS PaidToDate,
+    ISNULL(A.POL_TRU_PREM_AMT, 0) AS LastModePremium,
+    ISNULL(A.POL_BILL_MODE_CD, '') AS PremiumMode,
+    ISNULL(BA.BNK_ID, '') AS BankName,
+    ISNULL(BA.BNK_ACCT_ID, '') AS BankAccountNumber,
+    ISNULL(BC.BNK_ACCT_HLDR_NM, '') AS BankAccountHolderName,
+    CL.DDA_CNF_DT AS ConfirmDate,
+    ISNULL(CL.DDA_CNF_CD, '') AS ConfirmCode,
+    ISNULL(CL.COL_BNK_CD, '') AS CollectingBank,
+    RB.RBILL_EFF_DT AS RestrictBillingEffectiveDate,
+    RB.RBILL_END_DT AS RestrictBillingEndDate,
+    ISNULL(A.SERV_AGT_ID, '') AS ServicingAgentID,
+    ISNULL(A.SERV_AGT_ID, '') AS ServicingAgent,
+    A.SERV_AGT_ASIGN_DT AS ServicingAgentAssignmentDate,
+    ISNULL(A.PREV_SERV_AGT_ID, '') AS PreviousServicingAgent,
+    ISNULL(AG.AGNT_STAT_CD, '') AS ServicingAgentStatus,
+    ISNULL(A.SERV_BR_ID, '') AS ServicingAgentBranch,
+    '' AS BillingAddress
+FROM DWM_POLICY A WITH (NOLOCK)
+INNER JOIN DWA_POLICY_CLIENT PT WITH (NOLOCK) ON PT.POL_ID = A.POL_ID
+LEFT JOIN DWM_COVERAGE B WITH (NOLOCK) ON A.POL_ID = B.POL_ID
+LEFT JOIN DWM_CLIENT C WITH (NOLOCK) ON PT.CLI_ID = C.CLI_ID
+LEFT JOIN DWA_CLIENT_NAME CI WITH (NOLOCK) ON CI.CLI_ID = C.CLI_ID
+LEFT JOIN (
+    SELECT CLI_ID, [CP], [EM], [BU], [HO], [ER]
+    FROM (
+        SELECT CLI_ID, CLI_CNTCT_ID_CD, CLI_CNTCT_ID_TXT
+        FROM DWA_CLIENT_CONTACT WITH (NOLOCK)
+    ) AS SourceTable
+    PIVOT (
+        MAX(CLI_CNTCT_ID_TXT)
+        FOR CLI_CNTCT_ID_CD IN ([CP], [EM], [BU], [HO], [ER])
+    ) AS PivotTable
+) pc ON CI.CLI_ID = pc.CLI_ID
+LEFT JOIN DWA_CLIENT_CREDIT_CARD CC WITH (NOLOCK) ON CC.CLI_ID = PT.CLI_ID
+LEFT JOIN DWM_CREDIT_CARD CR WITH (NOLOCK) ON CR.CRC_ID = CC.CRC_ID
+LEFT JOIN DWA_CLIENT_BANKACCOUNT BA WITH (NOLOCK) ON BA.CLI_ID = PT.CLI_ID
+LEFT JOIN DWM_BANK_ACCOUNT BC WITH (NOLOCK) ON BC.BNK_ACCT_ID = BA.BNK_ACCT_ID
+LEFT JOIN DWA_POLICY_CLIENT CL WITH (NOLOCK) ON CL.POL_ID = A.POL_ID
+LEFT JOIN DWT_RESTRICT_BILL RB WITH (NOLOCK) ON RB.POL_ID = A.POL_ID
+LEFT JOIN DWM_AGENT AG WITH (NOLOCK) ON AG.AGNT_NUM = A.SERV_AGT_ID
+WHERE A.POL_ID = @PolicyID
+OPTION (MAXDOP 4);
+
+-- Query 2: Universal Life Coverage Information
+DECLARE @tanggal DATETIME;
+SELECT @tanggal = MAX(PREV_UPDT_TS) 
+FROM DWM_TUHCO WITH (NOLOCK)
+WHERE POL_ID = @PolicyID;
+
+SELECT
+    ISNULL(CAST(CVG_NUM AS VARCHAR(50)), '') AS CoverageNumber,
+    ISNULL(CVG_SUM_INS_AMT, 0) AS SumInsuredAmount,
+    ISNULL(MTHV_CVG_NAR_AMT, 0) AS NetAmountAtRisk,
+    ISNULL(CVG_GUAR_COI_AMT, 0) AS GuaranteedCostOfInsurance,
+    ISNULL(STD_MORT_CHRG_AMT, 0) AS MortalityCharge,
+    ISNULL(CVG_BNFT_CHRG_AMT, 0) AS SupplementaryBenefitCharges,
+    ISNULL(SSTD_MORT_CHRG_AMT, 0) AS SubstandardMortalityCharge,
+    ISNULL(CVG_PERI_LOAD_AMT, 0) AS PeriodicLoadCharge,
+    ISNULL(MTHV_CVG_SHRT_AMT, 0) AS IssueCharges
+FROM DWM_TUHCO WITH (NOLOCK)
+WHERE POL_ID = @PolicyID AND PREV_UPDT_TS = @tanggal;
+
+-- Query 3: Beneficiary Information
+SELECT
+    CO_ID,
+    ISNULL(BNFY_SEQ_NUM, 0) AS SequenceNumber,
+    POL_ID AS PolicyID,
+    ISNULL(BNFY_NM, '') AS BeneficiaryName,
+    ISNULL(BNFY_PRCDS_PCT, 0) AS Percentage,
+    ISNULL(BNFY_SEX_CD, '') AS Gander,
+    ISNULL(BNFY_REL_INSRD_CD, '') AS Relationtoinsured,
+    ISNULL(TRST_NM, '') AS Trusteellane,
+    ISNULL(BNFY_REL_TRST_CD, '') AS Relationtofrustee,
+    ISNULL(PREV_UPDT_USER_ID, '') AS LastUpdateBy,
+    ISNULL(PREV_UPDT_TS, '1900-01-01') AS LastUpdatedDate
+FROM DWA_POLICY_BENEFICIARY WITH (NOLOCK)
+WHERE POL_ID = @PolicyID;
+
+-- Query 4: Billing Information (Empty)
+SELECT TOP 0
+    '' AS Currency,
+    CAST(0 AS DECIMAL(18,2)) AS SundryPaymentAmount,
+    CAST('1900-01-01' AS DATETIME) AS BilltoDate,
+    '' AS BillingType,
+    '' AS CreditCardType,
+    '' AS CreditCardNumber,
+    '' AS CreditCardHolderName,
+    '' AS ExpiryMonthYear,
+    CAST(0 AS DECIMAL(18,2)) AS TruePremium,
+    CAST('1900-01-01' AS DATETIME) AS PaidToDate,
+    CAST(0 AS DECIMAL(18,2)) AS LastModePremium,
+    '' AS PremiumMode,
+    '' AS BankName,
+    '' AS BankAccountNumber,
+    '' AS BankAccountHolderName;
+
+-- Query 5: Current Payor DDA Relationships (Empty)
+SELECT TOP 0
+    CAST('1900-01-01' AS DATETIME) AS ConfirmDate,
+    '' AS ConfirmCode,
+    '' AS CollectingBank;
+
+-- Query 6: Restrict Billing Info (Empty)
+SELECT TOP 0
+    CAST('1900-01-01' AS DATETIME) AS RestrictBillingEffectiveDate,
+    CAST('1900-01-01' AS DATETIME) AS RestrictBillingEndDate;
+
+-- Query 7: Servicing Agent Information (Empty)
+SELECT TOP 0
+    '' AS ServicingAgentID,
+    '' AS ServicingAgent,
+    CAST('1900-01-01' AS DATETIME) AS ServicingAgentAssignmeatDate,
+    '' AS Previousservicingagent,
+    '' AS ServicingAgentStatus,
+    '' AS AgentTypeDescription,
+    '' AS ServicingAgentBranch;
+
+-- Query 8: Writing Agent Information (Empty)
+SELECT TOP 0
+    '' AS WritingAgent1Name,
+    '' AS WritingAgent2Name,
+    '' AS WritingAgent3Name,
+    CAST(0 AS DECIMAL(18,2)) AS WritingAgent1Share,
+    CAST(0 AS DECIMAL(18,2)) AS WritingAgent2Share,
+    CAST(0 AS DECIMAL(18,2)) AS WritingAgent3Share;";
+        }
+    }
+}
