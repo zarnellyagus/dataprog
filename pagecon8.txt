@@ -1,0 +1,100 @@
+import { Component, OnInit } from '@angular/core';
+import { ActivatedRoute } from '@angular/router';
+import { DatePipe } from '@angular/common';
+import {
+  PolicyService,
+  EPolicyStatus,
+  PolicySummary
+} from '../services/policy.service';
+
+@Component({
+  selector: 'app-policy-detail',
+  templateUrl: './policy-detail.component.html',
+  styleUrls: ['./policy-detail.component.scss']
+})
+export class PolicyDetailComponent implements OnInit {
+  policyId = '';
+
+  // Detail policy utama
+  policyDetail: any = null;
+
+  // Status E-Policy (Email/WA, tanggal kirim, dll.)
+  ePolicyStatuses: EPolicyStatus[] = [];
+
+  // Riwayat pengiriman fisik (summary)
+  policySummaries: PolicySummary[] = [];
+
+  isLoadingDetail = false;
+  isLoadingStatus = false;
+  isLoadingSummary = false;
+
+  constructor(
+    private route: ActivatedRoute,
+    private policyService: PolicyService,
+    private datePipe: DatePipe
+  ) {}
+
+  ngOnInit(): void {
+    // Ambil policyId dari route: /policy-detail/:id
+    this.policyId = this.route.snapshot.paramMap.get('id') || '';
+
+    if (this.policyId) {
+      this.loadPolicyDetail(this.policyId);
+      this.loadEpolicyStatus(this.policyId);
+      this.loadPolicySummary(this.policyId);
+    }
+  }
+
+  loadPolicyDetail(policyId: string): void {
+    this.isLoadingDetail = true;
+
+    this.policyService.getPolicyDetail(policyId).subscribe({
+      next: (detail: any) => {
+        this.policyDetail = detail;
+        this.isLoadingDetail = false;
+      },
+      error: (error) => {
+        console.error('Error loadPolicyDetail:', error);
+        this.policyDetail = null;
+        this.isLoadingDetail = false;
+      }
+    });
+  }
+
+  loadEpolicyStatus(policyId: string): void {
+    this.isLoadingStatus = true;
+
+    this.policyService.getEpolicy(policyId).subscribe({
+      next: (statuses: EPolicyStatus[]) => {
+        this.ePolicyStatuses = statuses;
+        this.isLoadingStatus = false;
+      },
+      error: (error) => {
+        console.error('Error loadEpolicyStatus:', error);
+        this.ePolicyStatuses = [];
+        this.isLoadingStatus = false;
+      }
+    });
+  }
+
+  loadPolicySummary(policyId: string): void {
+    this.isLoadingSummary = true;
+
+    this.policyService.getPolicySummary(policyId).subscribe({
+      next: (summaries: PolicySummary[]) => {
+        this.policySummaries = summaries;
+        this.isLoadingSummary = false;
+      },
+      error: (error) => {
+        console.error('Error loadPolicySummary:', error);
+        this.policySummaries = [];
+        this.isLoadingSummary = false;
+      }
+    });
+  }
+
+  formatDate(date: any, format: string = 'dd/MM/yyyy'): string {
+    if (!date) return '-';
+    return this.datePipe.transform(date, format) || '-';
+  }
+}
