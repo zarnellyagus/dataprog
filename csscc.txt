@@ -1,0 +1,173 @@
+/* Root container */
+.consolidate-policy-page {
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 13px;
+  color: #333;
+  background-color: #f5f7fb;
+  padding: 10px 15px;
+}
+
+/* Card override agar mirip panel flat */
+.consolidate-policy-page .card {
+  border-radius: 0;
+  border: 1px solid #d0d7e5;
+  box-shadow: none;
+}
+
+/* Header */
+.consolidate-policy-page .card-header {
+  padding: 6px 10px;
+  background: linear-gradient(to bottom, #e6f1ff, #d5e7ff);
+  border-bottom: 1px solid #c2d2f2;
+}
+
+.consolidate-policy-page .card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f4e79;
+}
+
+/* Table wrapper */
+.consolidate-policy-page .table-responsive {
+  max-height: 420px;            /* biar bisa scroll seperti grid */
+  overflow-y: auto;
+}
+
+/* Table style seperti grid WinForms / WebForms */
+.consolidate-policy-page .table {
+  margin-bottom: 0;
+  border-collapse: collapse;
+}
+
+.consolidate-policy-page .table thead {
+  background: linear-gradient(to bottom, #4f81bd, #3b6ea5);
+  color: #ffffff;
+}
+
+.consolidate-policy-page .table thead th {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 8px;
+  border-right: 1px solid #29527a;
+  border-bottom: 1px solid #29527a;
+  white-space: nowrap;
+}
+
+.consolidate-policy-page .table thead th:last-child {
+  border-right: none;
+}
+
+/* Body rows */
+.consolidate-policy-page .table tbody tr {
+  background-color: #ffffff;
+}
+
+.consolidate-policy-page .table tbody tr:nth-child(even) {
+  background-color: #f4f8ff;    /* baris selang-seling */
+}
+
+.consolidate-policy-page .table tbody td {
+  padding: 5px 8px;
+  border-right: 1px solid #d0d7e5;
+  border-bottom: 1px solid #d0d7e5;
+  vertical-align: middle;
+  font-size: 12px;
+}
+
+.consolidate-policy-page .table tbody td:last-child {
+  border-right: none;
+}
+
+/* Hover row */
+.consolidate-policy-page .table tbody tr:hover {
+  background-color: #dbe9ff;
+}
+
+/* Link Policy ID */
+.consolidate-policy-page a.text-primary {
+  color: #1f4e79 !important;
+  text-decoration: none;
+}
+
+.consolidate-policy-page a.text-primary:hover {
+  text-decoration: underline;
+}
+
+/* Badge CompanyID lebih flat */
+.consolidate-policy-page .badge.bg-light.text-dark {
+  background-color: #eef3fb !important;
+  border: 1px solid #c4cde0;
+  font-weight: 400;
+}
+
+/* Action button (Detail) mirip tombol merah Delete di contoh tapi biru) */
+.consolidate-policy-page .btn-outline-primary.btn-sm {
+  border-radius: 0;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+/* Search card */
+.consolidate-policy-page .card.mb-4 {
+  border-radius: 0;
+}
+
+.consolidate-policy-page .form-label {
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.consolidate-policy-page .form-control,
+.consolidate-policy-page .form-select {
+  font-size: 12px;
+  padding: 4px 6px;
+  height: 26px;
+  border-radius: 0;
+  border: 1px solid #b8c6dd;
+}
+
+/* Pagination bar seperti di gambar (pager bawah) */
+.consolidate-policy-page .card-footer {
+  border-top: 1px solid #c2d2f2;
+  background: #e6eefc;
+  font-size: 11px;
+}
+
+.consolidate-policy-page .pagination {
+  margin-bottom: 0;
+}
+
+.consolidate-policy-page .pagination .page-item .page-link {
+  border-radius: 0 !important;
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid #b0c0dd;
+  color: #1f4e79;
+  background-color: #ffffff;
+}
+
+.consolidate-policy-page .pagination .page-item.active .page-link {
+  background-color: #4f81bd;
+  color: #ffffff;
+  border-color: #3b6ea5;
+}
+
+.consolidate-policy-page .pagination .page-item.disabled .page-link {
+  color: #a0a9b8;
+  background-color: #f1f3f8;
+}
+
+/* Pager icon style (<< < > >> gaya flat) */
+.consolidate-policy-page .pagination .page-link i {
+  font-size: 10px;
+}
+
+/* Info text kiri bawah */
+.consolidate-policy-page .card-footer .small.text-muted {
+  font-size: 11px;
+}
+
+/* Debug panel (boleh dihapus nanti) */
+.consolidate-policy-page .bg-light-subtle {
+  background-color: #f5f7fb !important;
+}
