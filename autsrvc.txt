@@ -1,0 +1,83 @@
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Observable, BehaviorSubject } from 'rxjs';
+import { tap } from 'rxjs/operators';
+
+export interface LoginRequest {
+  username: string;      // ✅ Backend match
+  password: string;
+  companyID: string;
+}
+
+export interface LoginResponse {
+  success: boolean;
+  message: string;
+  username: string;      // ✅ Backend response
+  companyId: string;
+}
+
+export interface Company {
+  companyID: string;
+  companyName: string;
+}
+
+export interface MenuItem {
+  objectId: string;
+  objectName: string;
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class AuthService {
+  private apiUrl = 'https://localhost:7147/api';
+  private currentUserSubject = new BehaviorSubject<any>(null);
+  public currentUser$ = this.currentUserSubject.asObservable();
+
+  // ✅ CORRECT CONSTRUCTOR - Dependency Injection
+  constructor(private http: HttpClient) {  // lowercase h + type
+    const user = localStorage.getItem('currentUser');
+    if (user) {
+      this.currentUserSubject.next(JSON.parse(user));
+    }
+  }
+
+  login(credentials: LoginRequest): Observable<LoginResponse> {
+    console.log('🔐 Login request:', credentials);
+    return this.http.post<LoginResponse>(`${this.apiUrl}/auth/login`, credentials)
+      .pipe(
+        tap((response: LoginResponse) => {
+          console.log('✅ Login response:', response);
+          if (response.success) {
+            const userData = {
+              userID: response.username,
+              companyID: response.companyId
+            };
+            localStorage.setItem('currentUser', JSON.stringify(userData));
+            this.currentUserSubject.next(userData);
+          }
+        })
+      );
+  }
+
+  getCompanies(): Observable<Company[]> {
+    return this.http.get<Company[]>(`${this.apiUrl}/auth/companies`);
+  }
+
+  getUserMenu(userId: string, companyId: string): Observable<MenuItem[]> {
+    return this.http.get<MenuItem[]>(`${this.apiUrl}/auth/menu/${userId}/${companyId}`);
+  }
+
+  logout(): void {
+    localStorage.removeItem('currentUser');
+    this.currentUserSubject.next(null);
+  }
+
+  isLoggedIn(): boolean {
+    return this.currentUserSubject.value !== null;
+  }
+
+  getCurrentUser() {
+    return this.currentUserSubject.value;
+  }
+}
