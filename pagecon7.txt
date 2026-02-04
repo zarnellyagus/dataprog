@@ -1,0 +1,99 @@
+import { Injectable } from '@angular/core';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { Observable } from 'rxjs';
+
+export interface ConsolidatePolicy {
+  companyID: string;
+  policyID: string;
+  appNo: string;
+  ownerName: string;
+  issuedDate: string; // ISO string dari backend
+}
+
+export interface PagedResult<T> {
+  data: T[];          // jika JSON Anda masih Data/TotalRecords, lihat catatan di bawah
+  totalRecords: number;
+  pageNumber: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface EPolicyStatus {
+  ePolSource: string;   // pastikan sama dengan JSON (EPolSource → ePolSource)
+  statusDate: string;   // DateTime → string
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class PolicyService {
+  private apiUrl = 'https://localhost:7147/api';
+
+  constructor(private http: HttpClient) {}
+
+  getConsolidatePolicy(
+    policyId: string | undefined,
+    appNo: string | undefined,
+    pageNumber: number,
+    pageSize: number
+  ): Observable<PagedResult<ConsolidatePolicy>> {
+
+    let params = new HttpParams()
+      .set('pageNumber', pageNumber)
+      .set('pageSize', pageSize);
+
+    if (policyId) {
+      params = params.set('policyId', policyId);
+    }
+    if (appNo) {
+      params = params.set('appNo', appNo);
+    }
+
+    return this.http.get<PagedResult<ConsolidatePolicy>>(
+      `${this.apiUrl}/policy/consolidate`,
+      { params }
+    );
+  }
+
+  getPolicyDetail(policyId: string): Observable<any> {
+    return this.http.get<any>(`${this.apiUrl}/policy/detail/${policyId}`);
+  }
+
+  // ✅ E-Policy status
+  getEpolicy(policyId: string): Observable<EPolicyStatus[]> {
+    return this.http.get<EPolicyStatus[]>(
+      `${this.apiUrl}/policy/epolicy-status/${policyId}`
+    );
+  }
+}
+
+
+
+
+using Backendconsolapp.Models;
+using Backendconsolapp.Services;
+using Microsoft.AspNetCore.Mvc;
+
+namespace Backendconsolapp.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class PolicyController : ControllerBase
+    {
+        private readonly IPolicyService _policyService;
+
+        public PolicyController(IPolicyService policyService)
+        {
+            _policyService = policyService;
+        }
+
+        // ... endpoint consolidate & detail
+
+        [HttpGet("epolicy-status/{policyId}")]
+        public async Task<ActionResult<List<EPolicyStatus>>> GetEPolicyStatus(string policyId)
+        {
+            var statuses = await _policyService.GetEPolicyStatusAsync(policyId);
+            return Ok(statuses);
+        }
+    }
+}
