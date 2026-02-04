@@ -1,0 +1,232 @@
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Threading.Tasks;
+
+namespace SalesForcAPI.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class AnticipatedEndowmentController : ControllerBase
+    {
+        private readonly IAnticipatedEndowmentRepository _repository;
+        private readonly ILogger<AnticipatedEndowmentController> _logger;
+
+        public AnticipatedEndowmentController(
+            IAnticipatedEndowmentRepository repository,
+            ILogger<AnticipatedEndowmentController> logger)
+        {
+            _repository = repository;
+            _logger = logger;
+        }
+
+        /// <summary>
+        /// Get anticipated endowment information by PolicyID
+        /// </summary>
+        [HttpPost]
+        [ProducesResponseType(typeof(AnticipatedEndowmentResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> Post([FromBody] AnticipatedEndowmentRequest request)
+        {
+            try
+            {
+                // Validate request
+                if (request == null || string.IsNullOrWhiteSpace(request.PolicyID))
+                {
+                    _logger.LogWarning("AnticipatedEndowment POST called with invalid or empty PolicyID");
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "PolicyID is required and cannot be empty"
+                    });
+                }
+
+                _logger.LogInformation(
+                    "Fetching anticipated endowment information for PolicyID: {PolicyID}",
+                    request.PolicyID);
+
+                // Call repository to get data
+                var result = await _repository.GetAnticipatedEndowmentAsync(request.PolicyID);
+
+                // Policy not found / no data → 404
+                if (result == null ||
+                    (result.ContractualPayoutInfo == null &&
+                     result.AEFundInfo == null &&
+                     (result.PayoutDates == null || result.PayoutDates.Count == 0)))
+                {
+                    _logger.LogWarning(
+                        "No anticipated endowment information found for PolicyID: {PolicyID}",
+                        request.PolicyID);
+
+                    return NotFound(new
+                    {
+                        success = false,
+                        errorCode = "POLICY_NOT_FOUND",
+                        message = $"PolicyID '{request.PolicyID}' not found"
+                    });
+                }
+
+                _logger.LogInformation(
+                    "Successfully retrieved anticipated endowment information for PolicyID: {PolicyID}. Payout Dates: {Count}",
+                    request.PolicyID, result.PayoutDates?.Count ?? 0);
+
+                // Return success response
+                return Ok(new
+                {
+                    success = true,
+                    message = "Anticipated endowment information retrieved successfully",
+                    data = result
+                });
+            }
+            catch (SqlException ex)
+            {
+                _logger.LogError(ex,
+                    "Database error while fetching anticipated endowment for PolicyID: {PolicyID}",
+                    request?.PolicyID);
+
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    success = false,
+                    message = "Database error occurred while processing your request",
+                    errorCode = ex.Number,
+                    error = ex.Message
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Unexpected error while fetching anticipated endowment for PolicyID: {PolicyID}",
+                    request?.PolicyID);
+
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    success = false,
+                    message = "An error occurred while processing your request",
+                    error = ex.Message
+                });
+            }
+        }
+    }
+}
+
+
+
+
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace SalesforcAPI.Repositories
+{
+    public class AnticipatedEndowmentRepository : IAnticipatedEndowmentRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<AnticipatedEndowmentRepository> _logger;
+
+        public AnticipatedEndowmentRepository(
+            IConfiguration configuration,
+            ILogger<AnticipatedEndowmentRepository> logger)
+        {
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                              ?? throw new ArgumentNullException("Connection string NDIBOARD33 not found");
+            _logger = logger;
+        }
+
+        public async Task<AnticipatedEndowmentResponse?> GetAnticipatedEndowmentAsync(string policyId)
+        {
+            if (string.IsNullOrWhiteSpace(policyId))
+                throw new ArgumentException("PolicyId cannot be null or empty", nameof(policyId));
+
+            try
+            {
+                using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                var sql = @"
+-- Contractual Payout Info
+SELECT
+    P.POL_ID AS PolicyID,
+    ISNULL(CP.PAYOUT_METHOD, '') AS PayoutMethod,
+    ISNULL(CP.PAYOUT_NUM, 0) AS PayoutNumber,
+    ISNULL(CP.NEXT_PAYOUT_DT, '2026-01-09T06:22:35.128Z') AS NextPayoutDate,
+    ISNULL(CP.LAST_PAYOUT_DT, '2026-01-09T06:22:35.128Z') AS LastPayoutDate,
+    ISNULL(CP.LAST_PAYOUT_AMT, 0) AS LastPayoutAmount,
+    ISNULL(CP.TOTAL_PAYOUT_AMT, 0) AS TotalPayoutAmount,
+    ISNULL(P.ISSUE_DT, '2026-01-09T06:22:35.128Z') AS IssueDate
+FROM DWM_POLICY P
+LEFT JOIN DWA_POLICY_PAYOUT CP ON P.POL_ID = CP.POL_ID
+WHERE P.POL_ID = @PolicyId;
+
+-- Payout Dates
+SELECT
+    ISNULL(PD.PAYOUT_DT, '2026-01-09T06:22:35.128Z') AS PayoutDate,
+    ISNULL(PD.PAYOUT_AMT, 0) AS PayoutAmount,
+    ISNULL(PD.PAYOUT_STATUS, '') AS PayoutStatus,
+    ISNULL(PD.SEQ_NUM, 0) AS SequenceNumber
+FROM DWA_PAYOUT_SCHEDULE PD
+WHERE PD.POL_ID = @PolicyId
+ORDER BY PD.PAYOUT_DT;
+
+-- AE Fund Information
+SELECT
+    ISNULL(AE.AE_FUND, '') AS AEFund,
+    ISNULL(AE.AE_FUND_INTEREST, '') AS AEFundInterest,
+    ISNULL(AE.LAST_WITHDRAWAL_DT, '2026-01-09T06:22:35.128Z') AS LastWithdrawalDate,
+    ISNULL(L.LOAN_BALANCE, 0) AS LoanBalance,
+    ISNULL(PL.PLAN_NAME, '') AS PlanName,
+    ISNULL(AE.LAST_WITHDRAWAL_AMT, 0) AS LastWithdrawalAmount
+FROM DWM_POLICY P
+LEFT JOIN DWA_AE_FUND AE ON P.POL_ID = AE.POL_ID
+LEFT JOIN DWA_POLICY_LOAN L ON P.POL_ID = L.POL_ID
+LEFT JOIN DWM_PLAN PL ON P.PLAN_ID = PL.PLAN_ID
+WHERE P.POL_ID = @PolicyId;
+";
+
+                using var multi = await connection.QueryMultipleAsync(sql, new { PolicyId = policyId });
+
+                var contractual = await multi.ReadFirstOrDefaultAsync<ContractualPayoutInformation>();
+                var payoutDates = (await multi.ReadAsync<PayoutDateInformation>()).ToList();
+                var aeFund = await multi.ReadFirstOrDefaultAsync<AEFundInformation>();
+
+                // Kalau tidak ada satupun data, anggap policy tidak ditemukan
+                if (contractual == null && aeFund == null && payoutDates.Count == 0)
+                {
+                    _logger.LogWarning("No anticipated endowment data for PolicyId={PolicyId}", policyId);
+                    return null;
+                }
+
+                var response = new AnticipatedEndowmentResponse
+                {
+                    ContractualPayoutInfo = contractual,
+                    PayoutDates = payoutDates,
+                    AEFundInfo = aeFund
+                };
+
+                return response;
+            }
+            catch (SqlException ex)
+            {
+                _logger.LogError(ex, "SQL Error in GetAnticipatedEndowmentAsync for PolicyId:{PolicyId}", policyId);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in GetAnticipatedEndowmentAsync for PolicyId:{PolicyId}", policyId);
+                throw;
+            }
+        }
+    }
+}
