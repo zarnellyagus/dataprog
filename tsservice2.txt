@@ -1,0 +1,238 @@
+using Microsoft.Data.SqlClient;  // ✅ Already have
+using Microsoft.Extensions.Caching.Memory; // ✅ Add this
+using Microsoft.Extensions.Logging; // ✅ Add this
+using Dapper;
+using Backendconsolapp.Models;
+using System.Data;
+
+namespace Backendconsolapp.Services
+{
+  
+
+    public class PolicyService : IPolicyService
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<PolicyService> _logger;
+        private readonly IMemoryCache? _cache; // Optional nullable
+
+        public PolicyService(
+            IConfiguration configuration,
+            ILogger<PolicyService> logger,
+            IMemoryCache cache) // ✅ Dependency injection
+        {
+            _connectionString = configuration.GetConnectionString("NDIPRINT33")
+                ?? throw new InvalidOperationException("NDIPRINT33 connection string missing");
+            _logger = logger;
+            _cache = cache;
+        }
+
+        /// <summary>
+        /// 🚀 Main: Single query + cache = &lt;3 seconds
+        /// </summary>
+        public async Task<PagedResult<ConsolidatePolicy>> GetConsolidatePoliciesAsync(
+            string? policyId, string? appNo, int pageNumber, int pageSize)
+        {
+            try
+            {
+                // ✅ Cache key
+                var cacheKey = $"policies_{policyId ?? ""}_{appNo ?? ""}_{pageNumber}_{pageSize}";
+                if (_cache?.TryGetValue(cacheKey, out PagedResult<ConsolidatePolicy>? cached) == true)
+                {
+                    _logger.LogInformation("✅ Cache HIT: {Key}", cacheKey);
+                    return cached;
+                }
+
+                using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                var offset = (pageNumber - 1) * pageSize;
+
+                // 🚀 SINGLE QUERY: Data + TotalRecords sekaligus
+                var query = @"
+                    SELECT 
+                        'CP' AS CompanyID,
+                        tce.EPolPolicyID AS PolicyID,
+                        dpi.POL_APP_FORM_ID AS AppNo,
+                        ISNULL(dpi.OWN_FIRST_NAME,'') + ' ' + ISNULL(dpi.OWN_LAST_NAME,'') AS OwnerName,
+                        dpi.POL_ISS_EFF_DT AS IssuedDate,
+                        COUNT(*) OVER() AS TotalRecords
+                    FROM dbo.tconsolidate_epolicy tce WITH(NOLOCK)
+                    LEFT JOIN [LNKSV801041].NDIBORD02.dbo.DWM_POLICY_INFO dpi WITH(NOLOCK)
+                        ON tce.EPolPolicyID = dpi.POL_ID AND dpi.CO_ID = 'CP'
+                    WHERE (@policyId IS NULL OR tce.EPolPolicyID LIKE '%' + @policyId + '%')
+                        AND (@appNo IS NULL OR dpi.POL_APP_FORM_ID LIKE '%' + @appNo + '%')
+                    ORDER BY dpi.POL_ISS_EFF_DT DESC
+                    OFFSET @offset ROWS 
+                    FETCH NEXT @pageSize ROWS ONLY";
+
+                var results = await connection.QueryAsync<PolicyResultWithCount>(query,
+                    new { policyId, appNo, offset, pageSize });
+
+                var policies = results.Select(r => new ConsolidatePolicy
+                {
+                    CompanyID = r.CompanyID,
+                    PolicyID = r.PolicyID,
+                    AppNo = r.AppNo,
+                    OwnerName = r.OwnerName,
+                    IssuedDate = r.IssuedDate
+                }).ToList();
+
+                var totalRecords = results.FirstOrDefault()?.TotalRecords ?? 0;
+                var result = new PagedResult<ConsolidatePolicy>
+                {
+                    Data = policies,
+                    TotalRecords = totalRecords,
+                    PageNumber = pageNumber,
+                    PageSize = pageSize,
+                    TotalPages = (int)Math.Ceiling((double)totalRecords / pageSize)
+                };
+
+                // ✅ Cache store
+                _cache?.Set(cacheKey, result, TimeSpan.FromMinutes(2));
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetConsolidatePoliciesAsync failed");
+                return new PagedResult<ConsolidatePolicy>(); // ✅ Always return
+            }
+        }
+
+        /// <summary>
+        /// ✅ Policy Detail - Cached 10 menit
+        /// </summary>
+        public async Task<PolicyDetail> GetPolicyDetailAsync(string policyId)
+        {
+            try
+            {
+                var cacheKey = $"policy_detail_{policyId}";
+                if (_cache?.TryGetValue(cacheKey, out PolicyDetail? cachedDetail) == true)
+                    return cachedDetail;
+
+                using var connection = new SqlConnection(_connectionString);
+                var result = await connection.QueryFirstOrDefaultAsync<PolicyDetail>(@"
+                    SELECT 
+                        msa.spaj_no AS SpajNo,
+                        dpi.POL_ID AS PolicyNo,
+                        dpi.INS_CLI_ID AS ClientID,
+                        ISNULL(dpi.OWN_FIRST_NAME,'') + ' ' + ISNULL(dpi.OWN_LAST_NAME,'') AS OwnerName,
+                        ISNULL(dpi.INS_FIRST_NAME,'') + ' ' + ISNULL(dpi.INS_LAST_NAME,'') AS InsuredName,
+                        dpp.PLAN_NM AS PlanName,
+                        dpi.POL_ISS_EFF_DT AS IssuedDate,
+                        dpi.SERV_AGT_ID AS AgentId,
+                        ISNULL(dpi.SERV_BR_ID,'') + ' - ' + ISNULL(dat.TEAM_NM,'') AS BranchName,
+                        '' AS AddressName,
+                        CASE WHEN tcen.EPolSource = 'Email' THEN tcen.EPolDest ELSE '' END AS Email,
+                        CASE WHEN tcen.EPolSource = 'WA' THEN tcen.EPolDest ELSE '' END AS TlpNum,
+                        CASE WHEN msa.ettp_received_date IS NULL THEN 'Paper' ELSE 'ETTP' END AS Ttp,
+                        ISNULL(CONVERT(varchar(10), msa.ettp_received_date, 105), 
+                               CONVERT(varchar(10), msa.ho_received_date, 105)) AS ReceiveDate
+                    FROM dbo.tconsolidate_epolicy tcen WITH(NOLOCK)
+                    LEFT JOIN [LINKTOSV80431].NDTRAX02.dbo.MST_SPAJ_ACCOUNT msa WITH(NOLOCK)
+                        ON tcen.EPolPolicyID = msa.policy_no
+                    LEFT JOIN [LNKSV801041].NDIBORD02.dbo.DWM_POLICY_INFO dpi WITH(NOLOCK)
+                        ON tcen.EPolPolicyID = dpi.POL_ID AND dpi.CO_ID='CP'
+                    LEFT JOIN [LNKSV801041].NDIBORD02.dbo.DWM_PLAN_INFO dpp WITH(NOLOCK)
+                        ON dpp.PLAN_ID = dpi.PLAN_ID AND dpi.CO_ID='CP'
+                    LEFT JOIN [LNKSV801041].NDIBORD02.DBO.DWM_AGENCY_TEAM dat WITH(NOLOCK)
+                        ON dpi.SERV_BR_ID = dat.TEAM_CD AND dat.CO_ID='CP'
+                    WHERE tcen.EPolPolicyID = @policyId", new { policyId });
+
+                var finalResult = result ?? new PolicyDetail();
+                _cache?.Set(cacheKey, finalResult, TimeSpan.FromMinutes(10));
+                return finalResult;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetPolicyDetailAsync failed: {PolicyId}", policyId);
+                return new PolicyDetail(); // ✅ Always return
+            }
+        }
+
+        /// <summary>
+        /// ✅ FIXED: EPolicyStatus - Always returns List
+        /// </summary>
+        public async Task<List<EPolicyStatus>> GetEPolicyStatusAsync(string policyId)
+        {
+            try
+            {
+                var cacheKey = $"epolicy_status_{policyId}";
+                if (_cache?.TryGetValue(cacheKey, out List<EPolicyStatus>? cached) == true)
+                    return cached;
+
+                using var connection = new SqlConnection(_connectionString);
+                var result = (await connection.QueryAsync<EPolicyStatus>(@"
+                    SELECT 
+                        EPolSource,
+                        MAX(EPolDate) as StatusDate
+                    FROM dbo.tconsolidate_epolicy WITH(NOLOCK)
+                    WHERE EPolPolicyID = @policyId
+                    GROUP BY EPolSource
+                    ORDER BY StatusDate DESC",
+                    new { policyId })).ToList();
+
+                _cache?.Set(cacheKey, result, TimeSpan.FromMinutes(10));
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetEPolicyStatusAsync failed: {PolicyId}", policyId);
+                return new List<EPolicyStatus>(); // ✅ ALWAYS RETURN
+            }
+        }
+
+        /// <summary>
+        /// ✅ FIXED: PolicySummary - Always returns List
+        /// </summary>
+        public async Task<List<PolicySummary>> GetPolicySummaryAsync(string policyId)
+        {
+            try
+            {
+                var cacheKey = $"policy_summary_{policyId}";
+                if (_cache?.TryGetValue(cacheKey, out List<PolicySummary>? cached) == true)
+                    return cached;
+
+                using var connection = new SqlConnection(_connectionString);
+                var result = (await connection.QueryAsync<PolicySummary>(@"
+                    SELECT 
+                        PolSumPolicyID, PolSumPickUpDate, PolSumStatusDate, PolSumStatus,
+                        PolSumReceiver, PolSumRelation, PolSumReturn, PolSumResiNo, PolSumCourier
+                    FROM tconsolidate_policysummary WITH(NOLOCK)
+                    WHERE PolSumPolicyID = @policyId
+                    ORDER BY PolSumStatusDate DESC",
+                    new { policyId })).ToList();
+
+                _cache?.Set(cacheKey, result, TimeSpan.FromMinutes(10));
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetPolicySummaryAsync failed: {PolicyId}", policyId);
+                return new List<PolicySummary>(); // ✅ ALWAYS RETURN
+            }
+        }
+    }
+}
+
+
+
+
+using System.Data.SqlClient;
+using Dapper;
+using Backendconsolapp.Models;
+namespace Backendconsolapp.Services
+{
+    public interface IPolicyService
+    {
+        Task<PagedResult<ConsolidatePolicy>> GetConsolidatePoliciesAsync(
+            string? policyId = null,
+            string? appNo = null,
+            int pageNumber = 1,
+            int pageSize = 10);
+
+        Task<PolicyDetail> GetPolicyDetailAsync(string policyId);
+        Task<List<EPolicyStatus>> GetEPolicyStatusAsync(string policyId);
+        Task<List<PolicySummary>> GetPolicySummaryAsync(string policyId);
+    }
+
+}
