@@ -1,0 +1,216 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+
+namespace SalesforcAPI.Repositories
+{
+    public class ValueInformationRepository : IValueInformationRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<ValueInformationRepository> _logger;
+        private readonly IMemoryCache _cache;
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(5);
+
+        public ValueInformationRepository(
+            IConfiguration configuration,
+            ILogger<ValueInformationRepository> logger,
+            IMemoryCache cache)
+        {
+            if (configuration == null)
+                throw new ArgumentNullException(nameof(configuration));
+
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                               ?? throw new ArgumentNullException(
+                                   nameof(configuration),
+                                   "Connection string NDIBOARD33 is not configured.");
+
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+        }
+
+        public async Task<ValueInformationResponse?> GetValueInformationAsync(string policyId)
+        {
+            if (string.IsNullOrWhiteSpace(policyId))
+                throw new ArgumentException("PolicyId cannot be null or empty", nameof(policyId));
+
+            var sw = Stopwatch.StartNew();
+            var cacheKey = $"ValueInfo_{policyId}";
+
+            // Try cache first
+            if (_cache.TryGetValue<ValueInformationResponse>(cacheKey, out var cachedResult))
+            {
+                _logger.LogInformation(
+                    "Cache HIT PolicyId={PolicyId} Time={Elapsed}ms",
+                    policyId, sw.ElapsedMilliseconds);
+
+                return cachedResult;
+            }
+
+            try
+            {
+                await using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                // Check if policy exists first
+                var policyExists = await CheckPolicyExistsAsync(connection, policyId);
+                if (!policyExists)
+                {
+                    _logger.LogWarning("Policy NOT FOUND PolicyId={PolicyId}", policyId);
+                    return null; // caller bisa mapping ke 404
+                }
+
+                // Execute queries
+                var sql = BuildOptimizedQuery();
+
+                using var multi = await connection.QueryMultipleAsync(
+                    sql,
+                    new { PolicyId = policyId },
+                    commandTimeout: 60);
+
+                // Query 1: Policy value info
+                var valueInfo = await multi.ReadFirstOrDefaultAsync<ValueInformationResponse>();
+
+                if (valueInfo == null)
+                {
+                    // Policy ada tapi tidak ada data value – kembalikan response kosong
+                    valueInfo = new ValueInformationResponse
+                    {
+                        PolicyId = policyId
+                    };
+                }
+                else
+                {
+                    // Pastikan PolicyId tidak null
+                    valueInfo.PolicyId ??= policyId;
+                }
+
+                // Query 2: Fund info
+                var fundInfo = await multi.ReadAsync<FundInformation>();
+                var fundList = fundInfo?.ToList() ?? new List<FundInformation>();
+
+                // CRITICAL: Jika tidak ada data fund, tambahkan 1 dummy row
+                if (fundList.Count == 0)
+                {
+                    fundList.Add(new FundInformation
+                    {
+                        Fund = "",  // Empty string sesuai requirement
+                        UnitPrice = 0,
+                        ApproximateNumberofUnits = 0,
+                        FundPercentage = 0,
+                        BaseCashValue = 0,
+                        CashSurrenderValue = 0
+                    });
+
+                    _logger.LogInformation(
+                        "No fund data found for PolicyId={PolicyId}, returning dummy fund item",
+                        policyId);
+                }
+
+                valueInfo.FundInformation = fundList;
+
+                // Cache the result
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetSlidingExpiration(_cacheDuration)
+                    .SetAbsoluteExpiration(TimeSpan.FromMinutes(15))
+                    .SetPriority(CacheItemPriority.High);
+
+                _cache.Set(cacheKey, valueInfo, cacheOptions);
+
+                sw.Stop();
+                _logger.LogInformation(
+                    "ValueInfo OK PolicyId={PolicyId} Funds={FundCount} Time={Elapsed}ms",
+                    policyId, valueInfo.FundInformation.Count, sw.ElapsedMilliseconds);
+
+                return valueInfo;
+            }
+            catch (SqlException sqlEx)
+            {
+                _logger.LogError(
+                    sqlEx,
+                    "SQL Error PolicyId={PolicyId} ErrorCode={ErrorCode}",
+                    policyId, sqlEx.Number);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error GetValueInformationAsync PolicyId={PolicyId}", policyId);
+                throw;
+            }
+        }
+
+        private static async Task<bool> CheckPolicyExistsAsync(SqlConnection connection, string policyId)
+        {
+            const string sql = @"
+SELECT CASE WHEN EXISTS (
+    SELECT 1
+    FROM DWM_POLICY WITH (NOLOCK)
+    WHERE POL_ID = @PolicyId
+) THEN 1 ELSE 0 END";
+
+            return await connection.ExecuteScalarAsync<bool>(
+                sql,
+                new { PolicyId = policyId });
+        }
+
+        private static string BuildOptimizedQuery()
+        {
+            return @"
+-- Query 1: Policy Value Information
+SELECT DISTINCT
+    TP.POL_ID AS PolicyId,
+    CAST(0 AS DECIMAL(18,2)) AS MCVNetBaseCaseValue,
+    CAST(0 AS DECIMAL(18,2)) AS SurrenderCharge,
+    CAST(0 AS DECIMAL(18,2)) AS CashSurrenderValue,
+    CAST(0 AS DECIMAL(18,2)) AS PaidupAdditionsCaseValue,
+    CAST(0 AS DECIMAL(18,2)) AS DividendVCVonDeposit,
+    CAST(0 AS DECIMAL(18,2)) AS DividendVCVonDepositInterest,
+    CAST(0 AS DECIMAL(18,2)) AS TerminalBonusforSurrender,
+    CAST(0 AS DECIMAL(18,2)) AS TotalBonus,
+    CAST(0 AS DECIMAL(18,2)) AS UnearnedPremium,
+    CAST(0 AS DECIMAL(18,2)) AS ReturnofPremiumAmount,
+    CAST(0 AS DECIMAL(18,2)) AS CashValueofAccumulatedRevisionary,
+    ISNULL(TP.POL_OS_DISB_AMT, 0) AS OutstandingDisbursements,
+    ISNULL(TP.POL_PREM_SUSP_AMT, 0) AS PremiumSuspense,
+    ISNULL(TP.POL_MISC_SUSP_AMT, 0) AS MiscellanousSuspense,
+    CAST(0 AS DECIMAL(18,2)) AS MaximumLoanAmountAvailable,
+    ISNULL(PL.LOAN_AMT, 0) AS LoanAmount,
+    ISNULL(PL.LOAN_INT_YTD_AMT, 0) AS LoanInterestPaidCapitalizedYTD,
+    ISNULL(PL.LOAN_AMT, 0) AS APLAmount,
+    ISNULL(PL.LOAN_AVB_AMT, 0) AS APLInterestPaidCapitalizedYTD,
+    ISNULL(PX.TAXBL_PREM_PD_AMT, 0) AS TotalPremiumsPaid
+FROM DWM_POLICY TP WITH (NOLOCK)
+LEFT JOIN DWA_POLICY_LOAN PL WITH (NOLOCK) ON PL.POL_ID = TP.POL_ID
+LEFT JOIN DWA_POLICY_TAX PX WITH (NOLOCK) ON PX.POL_ID = TP.POL_ID
+WHERE TP.POL_ID = @PolicyId
+OPTION (MAXDOP 2);
+
+-- Query 2: Fund Information
+WITH MaxEffDate AS (
+    SELECT MAX(FIA_EFF_DT) AS MaxDate
+    FROM DWT_FIA WITH (NOLOCK)
+    WHERE POL_ID = @PolicyId
+)
+SELECT
+    ISNULL(FI.FND_ID, '') AS Fund,
+    ISNULL(FI.FIA_AUNIT_PRIC_AMT, 0) AS UnitPrice,
+    ISNULL(FI.CFN_INTG_AUNIT_QTY, 0) AS ApproximateNumberofUnits,
+    CAST(10 AS DECIMAL(18,2)) AS FundPercentage,
+    CAST(0 AS DECIMAL(18,2)) AS BaseCashValue,
+    CAST(0 AS DECIMAL(18,2)) AS CashSurrenderValue
+FROM DWT_FIA FI WITH (NOLOCK)
+CROSS JOIN MaxEffDate
+WHERE FI.POL_ID = @PolicyId
+  AND FI.FIA_EFF_DT = MaxEffDate.MaxDate
+OPTION (MAXDOP 2);";
+        }
+    }
+}
