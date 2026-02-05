@@ -1,0 +1,282 @@
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace SalesforcAPI.Repositories
+{
+    public class TransactionHistoryRepository : ITransactionHistoryRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<TransactionHistoryRepository> _logger;
+        private readonly IMemoryCache _cache;
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(5);
+
+        public TransactionHistoryRepository(
+            IConfiguration configuration,
+            ILogger<TransactionHistoryRepository> logger,
+            IMemoryCache cache)
+        {
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                ?? throw new ArgumentNullException(nameof(configuration),
+                    "Connection string NDIBOARD33 not found.");
+            _logger = logger;
+            _cache = cache;
+        }
+
+        /// <summary>
+        /// Get paginated transaction history summary with empty data handling
+        /// </summary>
+        public async Task<PagedResponse<TransactionHistoryResponse>?> GetTransactionHistoryAsync(
+            TransactionHistoryPagedRequest request)
+        {
+            var sw = Stopwatch.StartNew();
+
+            // VALIDATION
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(request.PolicyID))
+                throw new ArgumentException("PolicyID is required.", nameof(request.PolicyID));
+
+            var pageNumber = request.PageNumber <= 0 ? 1 : request.PageNumber;
+            var pageSize = request.PageSize <= 0 ? 10 : Math.Min(request.PageSize, 50); // Cap at 50
+            var offset = (pageNumber - 1) * pageSize;
+
+            var cacheKey = $"TxHistory_{request.PolicyID}_P{pageNumber}_S{pageSize}";
+
+            // CACHE HIT CHECK
+            if (_cache.TryGetValue<PagedResponse<TransactionHistoryResponse>>(cacheKey, out var cachedResult))
+            {
+                _logger.LogInformation("Cache HIT PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                sw.Stop();
+                return cachedResult;
+            }
+
+            PagedResponse<TransactionHistoryResponse>? result = null;
+
+            try
+            {
+                using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                // 1. POLICY EXISTS CHECK (CRITICAL - 0.3ms)
+                var policyExists = await CheckPolicyExistsAsync(connection, request.PolicyID);
+                if (!policyExists)
+                {
+                    sw.Stop();
+                    _logger.LogWarning("Policy NOT FOUND PolicyID={PolicyID} Time={Elapsed}ms",
+                        request.PolicyID, sw.ElapsedMilliseconds);
+                    return CreateEmptyResponse(pageNumber, pageSize, 0);
+                }
+
+                // 2. EXECUTE OPTIMIZED QUERIES
+                var sql = BuildOptimizedQuery();
+                var param = new { PolicyID = request.PolicyID, Offset = offset, PageSize = pageSize };
+
+                using var multi = await connection.QueryMultipleAsync(sql, param, commandTimeout: 30);
+
+                // 3. READ MULTIPLE RESULT SETS
+                var totalRecords = await multi.ReadSingleOrDefaultAsync<int?>() ?? 0;
+                var withdrawal = (await multi.ReadAsync<WithdrawalSummary>()).ToList();
+                var switching = (await multi.ReadAsync<Switching>()).ToList();
+                var detailSwitching = (await multi.ReadAsync<DetailSwitching>()).ToList();
+
+                // 4. BUILD RESPONSE WITH EMPTY DATA HANDLING
+                result = CreateTransactionResponse(totalRecords, withdrawal, switching, detailSwitching, 
+                    pageNumber, pageSize);
+
+                // 5. CACHE RESULT
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetSlidingExpiration(_cacheDuration)
+                    .SetAbsoluteExpiration(TimeSpan.FromMinutes(15))
+                    .SetPriority(CacheItemPriority.High);
+
+                _cache.Set(cacheKey, result, cacheOptions);
+
+                sw.Stop();
+                _logger.LogInformation(
+                    "TransactionHistory OK PolicyID={PolicyID} Records={Records} Time={Elapsed}ms",
+                    request.PolicyID, totalRecords, sw.ElapsedMilliseconds);
+
+                return result;
+            }
+            catch (SqlException sqlEx) when (sqlEx.Number == -2) // TIMEOUT
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx, "SQL TIMEOUT PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                throw new TimeoutException($"Database timeout for PolicyID '{request.PolicyID}'.", sqlEx);
+            }
+            catch (SqlException sqlEx)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx, "SQL Error PolicyID={PolicyID} ErrorCode={ErrorCode} Time={Elapsed}ms",
+                    request.PolicyID, sqlEx.Number, sw.ElapsedMilliseconds);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                _logger.LogError(ex, "Error GetTransactionHistoryAsync PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Create empty response structure (consistent API contract)
+        /// </summary>
+        private PagedResponse<TransactionHistoryResponse> CreateEmptyResponse(int pageNumber, int pageSize, int totalRecords)
+        {
+            return new PagedResponse<TransactionHistoryResponse>
+            {
+                Data = new TransactionHistoryResponse
+                {
+                    WithdrawalSummary = new List<WithdrawalSummary>(),
+                    SwitchingTransactions = new List<Switching>
+                    {
+                        new Switching
+                        {
+                            ActivityEffectiveDate = DateTime.UtcNow,
+                            ActivityType = "No Data",
+                            NetAmount = 0,
+                            EffectiveDateOfReversal = DateTime.UtcNow
+                        }
+                    },
+                    DetailSwitching = new List<DetailSwitching>
+                    {
+                        new DetailSwitching
+                        {
+                            Fund = "No Data",
+                            UnitPrice = 0,
+                            NetUnitChange = 0,
+                            ApproximateNumberOfUnits = 0,
+                            FundAccumulationUnit = 0
+                        }
+                    }
+                },
+                PageNumber = pageNumber,
+                PageSize = pageSize,
+                TotalRecords = totalRecords,
+                TotalPages = 0
+            };
+        }
+
+        /// <summary>
+        /// Create transaction response with data validation
+        /// </summary>
+        private PagedResponse<TransactionHistoryResponse> CreateTransactionResponse(
+            int totalRecords, List<WithdrawalSummary> withdrawal, 
+            List<Switching> switching, List<DetailSwitching> detailSwitching,
+            int pageNumber, int pageSize)
+        {
+            return new PagedResponse<TransactionHistoryResponse>
+            {
+                Data = new TransactionHistoryResponse
+                {
+                    WithdrawalSummary = withdrawal.Any() ? withdrawal : new List<WithdrawalSummary>(),
+                    SwitchingTransactions = switching.Any() ? switching : new List<Switching>
+                    {
+                        new Switching { ActivityEffectiveDate = DateTime.UtcNow, ActivityType = "No Data", NetAmount = 0, EffectiveDateOfReversal = DateTime.UtcNow }
+                    },
+                    DetailSwitching = detailSwitching.Any() ? detailSwitching : new List<DetailSwitching>
+                    {
+                        new DetailSwitching { Fund = "No Data", UnitPrice = 0, NetUnitChange = 0, ApproximateNumberOfUnits = 0, FundAccumulationUnit = 0 }
+                    }
+                },
+                PageNumber = pageNumber,
+                PageSize = pageSize,
+                TotalRecords = totalRecords,
+                TotalPages = totalRecords == 0 ? 0 : (int)Math.Ceiling(totalRecords / (double)pageSize)
+            };
+        }
+
+        /// <summary>
+        /// Fast policy existence check
+        /// </summary>
+        private async Task<bool> CheckPolicyExistsAsync(SqlConnection connection, string policyId)
+        {
+            const string sql = @"
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM DWM_POLICY WITH (NOLOCK)
+                    WHERE POL_ID = @PolicyID
+                ) THEN 1 ELSE 0 END";
+
+            try
+            {
+                return await connection.ExecuteScalarAsync<bool>(sql, new { PolicyID = policyId });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error checking policy existence PolicyID={PolicyID}", policyId);
+                return true; // Fail-safe
+            }
+        }
+
+        /// <summary>
+        /// Optimized multi-statement query for all transaction data
+        /// </summary>
+        private string BuildOptimizedQuery()
+        {
+            return $@"
+-- Q1: Total CIA transaction count
+SELECT COUNT(1)
+FROM DWT_CIA CIA WITH (NOLOCK)
+WHERE CIA.POL_ID = @PolicyID
+OPTION (MAXDOP 2);
+
+-- Q2: Withdrawal Summary (paginated + ranked)
+WITH RankedWithdrawals AS (
+    SELECT
+        PL.POL_ID AS PolicyID,
+        CIA.CIA_FND_TRXN_AMT AS TotalWithdrawalAmount,
+        CIA.CIA_EFF_DT AS WithdrawalEffectiveDate,
+        ISNULL(DCC.CIA_ALLOC_DPOS_AMT, 0) AS TotalAmount,
+        ROW_NUMBER() OVER (PARTITION BY PL.POL_ID ORDER BY CIA.CIA_EFF_DT DESC) AS RowNum
+    FROM DWM_POLICY PL WITH (NOLOCK)
+    LEFT JOIN DWT_CIA CIA WITH (NOLOCK) ON CIA.POL_ID = PL.POL_ID
+    LEFT JOIN DWT_CIA_COVERAGE DCC WITH (NOLOCK) ON DCC.POL_ID = PL.POL_ID
+    WHERE PL.POL_ID = @PolicyID
+)
+SELECT PolicyID, TotalWithdrawalAmount, WithdrawalEffectiveDate, TotalAmount
+FROM RankedWithdrawals
+WHERE RowNum > @Offset AND RowNum <= (@Offset + @PageSize)
+ORDER BY WithdrawalEffectiveDate DESC
+OPTION (MAXDOP 2);
+
+-- Q3: Switching Transactions (paginated)
+SELECT
+    CIA.CIA_EFF_DT AS ActivityEffectiveDate,
+    CIA.CIA_TYP_CD AS ActivityType,
+    CIA.CIA_FND_TRXN_AMT AS NetAmount,
+    COALESCE(CIA.CIA_REVRS_PRCES_DT, '1900-01-01') AS EffectiveDateOfReversal
+FROM DWT_CIA CIA WITH (NOLOCK)
+WHERE CIA.POL_ID = @PolicyID
+ORDER BY CIA.CIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2, RECOMPILE);
+
+-- Q4: Detail Switching (paginated)
+SELECT
+    FA.FND_ID AS Fund,
+    ISNULL(FP.PURCH_PRIC_1_AMT, 0) AS UnitPrice,
+    ISNULL(FA.FIA_INTG_AUNIT_QTY, 0) AS NetUnitChange,
+    ISNULL(FA.CFN_INTG_AUNIT_QTY, 0) AS ApproximateNumberOfUnits,
+    CAST(0 AS DECIMAL(18,2)) AS FundAccumulationUnit
+FROM DWT_FIA FA WITH (NOLOCK)
+INNER JOIN DWT_FUND_UNIT_PRICE FP WITH (NOLOCK)
+    ON FP.FND_ID = FA.FND_ID AND FA.FIA_EFF_DT = FP.FNDVL_EFF_DT
+WHERE FA.POL_ID = @PolicyID
+ORDER BY FA.FIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2, RECOMPILE);";
+        }
+    }
+}
