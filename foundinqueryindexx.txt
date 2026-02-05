@@ -1,0 +1,68 @@
+
+
+
+
+index optimasi found
+SELECT
+    ISNULL(FI.FIA_EFF_DT, '1900-01-01') AS ActivityEffectiveDate,
+    ISNULL(FI.FIA_SEQ_NUM, 0) AS SequenceNumber,
+    ISNULL(FN.FND_TYP_CD, 'UNKNOWN') AS ActivityType,
+    CAST(0 AS DECIMAL(18,2)) AS TotalPremiumReceived,
+    ISNULL(FI.FIA_FND_TRXN_AMT, 0) AS NetAmount,
+    ISNULL(FI.FIA_LOAD_AMT, 0) AS TransferCharges
+FROM DWT_FIA FI WITH (NOLOCK, INDEX(IX_DWT_FIA_PolicyActivity_Covering))
+LEFT JOIN DWM_FUND FN WITH (NOLOCK, INDEX(IX_DWM_FUND_FND_ID_TYPE))
+    ON FN.FND_ID = FI.FND_ID
+WHERE FI.POL_ID = @PolicyId
+ORDER BY FI.FIA_EFF_DT DESC, FI.FIA_SEQ_NUM DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2, OPTIMIZE FOR (@PolicyId UNKNOWN), RECOMPILE);
+
+
+-- Index untuk JOIN ke DWM_FUND
+CREATE NONCLUSTERED INDEX IX_DWM_FUND_FND_ID_TYPE
+ON DWM_FUND (FND_ID)
+INCLUDE (FND_TYP_CD)
+WITH (ONLINE = ON, FILLFACTOR = 95);
+
+
+-- Index khusus untuk COUNT (jika belum ada)
+CREATE NONCLUSTERED INDEX IX_DWT_FIA_PolicyCount
+ON DWT_FIA (POL_ID)
+WITH (ONLINE = ON, FILLFACTOR = 90);
+
+
+
+/// <summary>
+/// Optimized data query with covering index hint (target: 3-5ms)
+/// </summary>
+private static string BuildDataQuery()
+{
+    return @"
+SELECT
+    ISNULL(FI.FIA_EFF_DT, '1900-01-01') AS ActivityEffectiveDate,
+    ISNULL(FI.FIA_SEQ_NUM, 0) AS SequenceNumber,
+    ISNULL(FN.FND_TYP_CD, 'UNKNOWN') AS ActivityType,
+    CAST(0 AS DECIMAL(18,2)) AS TotalPremiumReceived,
+    ISNULL(FI.FIA_FND_TRXN_AMT, 0) AS NetAmount,
+    ISNULL(FI.FIA_LOAD_AMT, 0) AS TransferCharges
+FROM DWT_FIA FI WITH (NOLOCK, INDEX(IX_DWT_FIA_PolicyActivity_Covering))
+LEFT JOIN DWM_FUND FN WITH (NOLOCK, INDEX(IX_DWM_FUND_FND_ID_TYPE))
+    ON FN.FND_ID = FI.FND_ID
+WHERE FI.POL_ID = @PolicyId
+ORDER BY FI.FIA_EFF_DT DESC, FI.FIA_SEQ_NUM DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2, OPTIMIZE FOR (@PolicyId UNKNOWN), RECOMPILE);";
+}
+
+/// <summary>
+/// Fast count query with index hint (target: 0.5-1ms)
+/// </summary>
+private static string BuildCountQuery()
+{
+    return @"
+SELECT COUNT_BIG(1)
+FROM DWT_FIA WITH (NOLOCK, INDEX(IX_DWT_FIA_PolicyCount))
+WHERE POL_ID = @PolicyId
+OPTION (MAXDOP 1);";
+}
