@@ -1,0 +1,16 @@
+using SalesforcAPI.Models;
+using System.Threading.Tasks;
+
+namespace SalesforcAPI.Interfaces
+{
+    /// <summary>
+    /// Interface untuk Fund Inquiry Activity Repository
+    /// </summary>
+    public interface IFundInquiryActivityRepository
+    {
+        /// <summary>
+        /// Get fund inquiry activity dengan pagination
+        /// Selalu return result (tidak null), dummy jika tidak ada data
+        /// </summary>
+        Task<PagedResult<FundInquiryActivity>> GetFundInquiryActivityAsync(FundInquiryActivityRequest request);
+    }
