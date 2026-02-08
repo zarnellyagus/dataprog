@@ -1,0 +1,389 @@
+-- =====================================================
+-- OPTIMIZED STORED PROCEDURE: FAST STAGING (TARGET < 20s)
+-- Database: NDIBOARD33
+-- Menggunakan: TABLOCK, PARALLEL INSERT, MINIMAL LOGGING
+-- =====================================================
+
+USE [NDIBOARD33]
+GO
+
+-- Drop procedure jika sudah ada
+IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[SP_STAGING_DB2_FAST]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[SP_STAGING_DB2_FAST]
+GO
+
+CREATE PROCEDURE [dbo].[SP_STAGING_DB2_FAST]
+    @TruncateBeforeInsert BIT = 0,
+    @TableName NVARCHAR(50) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Optimasi setting untuk performa maksimal
+    SET XACT_ABORT ON;  -- Auto rollback jika error
+
+    DECLARE @StartTime DATETIME = GETDATE();
+    DECLARE @EndTime DATETIME;
+    DECLARE @TotalRows INT = 0;
+    DECLARE @RowCount INT;
+    DECLARE @SuccessCount INT = 0;
+    DECLARE @ErrorCount INT = 0;
+    DECLARE @CurrentTable NVARCHAR(50);
+
+    PRINT '========================================';
+    PRINT 'FAST STAGING STARTED (OPTIMIZED MODE)';
+    PRINT 'Start: ' + CONVERT(VARCHAR, @StartTime, 120);
+    PRINT '========================================';
+
+    BEGIN TRY
+
+        -- 1. TPOL --> SI_TPOL_SF
+        IF (@TableName IS NULL OR @TableName = 'TPOL')
+        BEGIN
+            SET @CurrentTable = 'TPOL';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TPOL_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TPOL_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TPOL]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TPOL: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 2. TCU --> SI_TCU_SF
+        IF (@TableName IS NULL OR @TableName = 'TCU')
+        BEGIN
+            SET @CurrentTable = 'TCU';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TCU_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TCU_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCU]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TCU: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 3. TEDIT --> SI_TEDIT_SF
+        IF (@TableName IS NULL OR @TableName = 'TEDIT')
+        BEGIN
+            SET @CurrentTable = 'TEDIT';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TEDIT_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TEDIT_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TEDIT]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TEDIT: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 4. TUHCO --> SI_TUHCO_SF
+        IF (@TableName IS NULL OR @TableName = 'TUHCO')
+        BEGIN
+            SET @CurrentTable = 'TUHCO';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TUHCO_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TUHCO_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TUHCO]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TUHCO: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 5. TCLNM --> SI_TCLNM_SF
+        IF (@TableName IS NULL OR @TableName = 'TCLNM')
+        BEGIN
+            SET @CurrentTable = 'TCLNM';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TCLNM_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TCLNM_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCLNM]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TCLNM: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 6. TCVG --> SI_TCVG_SF
+        IF (@TableName IS NULL OR @TableName = 'TCVG')
+        BEGIN
+            SET @CurrentTable = 'TCVG';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TCVG_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TCVG_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCVG]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TCVG: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 7. TCLIC --> SI_TCLIC_SF
+        IF (@TableName IS NULL OR @TableName = 'TCLIC')
+        BEGIN
+            SET @CurrentTable = 'TCLIC';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TCLIC_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TCLIC_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCLIC]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TCLIC: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 8. TCRCD --> SI_TCRCD_SF
+        IF (@TableName IS NULL OR @TableName = 'TCRCD')
+        BEGIN
+            SET @CurrentTable = 'TCRCD';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TCRCD_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TCRCD_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCRCD]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TCRCD: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 9. TBNKA --> SI_TBNKA_SF
+        IF (@TableName IS NULL OR @TableName = 'TBNKA')
+        BEGIN
+            SET @CurrentTable = 'TBNKA';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TBNKA_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TBNKA_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TBNKA]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TBNKA: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 10. TRSTB --> SI_TRSTB_SF
+        IF (@TableName IS NULL OR @TableName = 'TRSTB')
+        BEGIN
+            SET @CurrentTable = 'TRSTB';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TRSTB_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TRSTB_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TRSTB]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TRSTB: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 11. TBENE --> SI_TBENE_SF
+        IF (@TableName IS NULL OR @TableName = 'TBENE')
+        BEGIN
+            SET @CurrentTable = 'TBENE';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TBENE_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TBENE_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TBENE]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TBENE: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 12. TCLIB --> SI_TCLIB_SF
+        IF (@TableName IS NULL OR @TableName = 'TCLIB')
+        BEGIN
+            SET @CurrentTable = 'TCLIB';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TCLIB_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TCLIB_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCLIB]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TCLIB: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        -- 13. TPOLW --> SI_TPOLW_SF
+        IF (@TableName IS NULL OR @TableName = 'TPOLW')
+        BEGIN
+            SET @CurrentTable = 'TPOLW';
+
+            IF @TruncateBeforeInsert = 1
+                TRUNCATE TABLE [dbo].[SI_TPOLW_SF];
+
+            -- OPTIMIZED INSERT dengan TABLOCK untuk minimal logging
+            INSERT INTO [dbo].[SI_TPOLW_SF] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TPOLW]
+            OPTION (MAXDOP 0);  -- Allow parallel processing
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+            PRINT 'TPOLW: ' + CAST(@RowCount AS VARCHAR) + ' rows';
+        END
+
+        
+    END TRY
+    BEGIN CATCH
+        SET @ErrorCount = @ErrorCount + 1;
+        PRINT 'ERROR at ' + @CurrentTable + ': ' + ERROR_MESSAGE();
+    END CATCH
+
+    SET @EndTime = GETDATE();
+
+    PRINT '========================================';
+    PRINT 'COMPLETED in ' + CAST(DATEDIFF(SECOND, @StartTime, @EndTime) AS VARCHAR) + ' seconds';
+    PRINT 'Success: ' + CAST(@SuccessCount AS VARCHAR) + ' | Failed: ' + CAST(@ErrorCount AS VARCHAR);
+    PRINT 'Total Rows: ' + CAST(@TotalRows AS VARCHAR);
+    PRINT '========================================';
+
+    SET NOCOUNT OFF;
+END
+GO
+
+-- =====================================================
+-- ALTERNATIVE: PARALLEL EXECUTION USING SQL JOBS
+-- =====================================================
+
+-- Drop procedure jika sudah ada
+IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[SP_STAGING_SINGLE_TABLE]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[SP_STAGING_SINGLE_TABLE]
+GO
+
+CREATE PROCEDURE [dbo].[SP_STAGING_SINGLE_TABLE]
+    @SourceTable NVARCHAR(50),
+    @TargetTable NVARCHAR(50),
+    @TruncateBeforeInsert BIT = 0
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @StartTime DATETIME = GETDATE();
+    DECLARE @RowCount INT;
+
+    BEGIN TRY
+        IF @TruncateBeforeInsert = 1
+            EXEC('TRUNCATE TABLE [dbo].[' + @TargetTable + ']');
+
+        -- OPTIMIZED INSERT
+        EXEC('
+            INSERT INTO [dbo].[' + @TargetTable + '] WITH (TABLOCK)
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[' + @SourceTable + ']
+            OPTION (MAXDOP 0)
+        ');
+
+        SET @RowCount = @@ROWCOUNT;
+
+        PRINT @SourceTable + ' completed: ' + CAST(@RowCount AS VARCHAR) + ' rows in ' + 
+              CAST(DATEDIFF(MILLISECOND, @StartTime, GETDATE()) AS VARCHAR) + 'ms';
+    END TRY
+    BEGIN CATCH
+        PRINT 'ERROR in ' + @SourceTable + ': ' + ERROR_MESSAGE();
+        THROW;
+    END CATCH
+END
+GO
+
+-- =====================================================
+-- USAGE / CARA PENGGUNAAN
+-- =====================================================
+
+-- METODE 1: Sequential (Simple, paling mudah)
+-- EXEC [dbo].[SP_STAGING_DB2_FAST] @TruncateBeforeInsert = 1;
+
+-- METODE 2: Parallel menggunakan multiple sessions (TERCEPAT)
+-- Buka 13 query window berbeda dan jalankan bersamaan:
+
+-- Session 1:
+-- EXEC [dbo].[SP_STAGING_SINGLE_TABLE] 'TPOL', 'SI_TPOL_SF', 1;
+
+-- Session 2:
+-- EXEC [dbo].[SP_STAGING_SINGLE_TABLE] 'TCU', 'SI_TCU_SF', 1;
+
+-- Session 3:
+-- EXEC [dbo].[SP_STAGING_SINGLE_TABLE] 'TEDIT', 'SI_TEDIT_SF', 1;
+
+-- ... dan seterusnya untuk semua table
+
+-- METODE 3: Menggunakan PowerShell untuk parallel execution
+-- Lihat file PS script yang disertakan
+
+PRINT 'Optimized Stored Procedures created successfully!';
+GO

@@ -1,0 +1,563 @@
+-- =====================================================
+-- STORED PROCEDURE: STAGING DB2 TO SQL SERVER
+-- Database: NDIBOARD33
+-- Linked Server: UDING602_SV80621
+-- DB2 Schema: UDING602
+-- Created: 2026-02-08
+-- =====================================================
+
+USE [NDIBOARD33]
+GO
+
+-- Drop procedure jika sudah ada
+IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[SP_STAGING_DB2_TO_SQLSERVER]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[SP_STAGING_DB2_TO_SQLSERVER]
+GO
+
+CREATE PROCEDURE [dbo].[SP_STAGING_DB2_TO_SQLSERVER]
+    @TruncateBeforeInsert BIT = 0,  -- 0: Tidak truncate, 1: Truncate sebelum insert
+    @TableName NVARCHAR(50) = NULL  -- NULL: Proses semua table, atau spesifik table name
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Variabel untuk tracking
+    DECLARE @StartTime DATETIME = GETDATE();
+    DECLARE @EndTime DATETIME;
+    DECLARE @TotalRows INT = 0;
+    DECLARE @RowCount INT;
+    DECLARE @ErrorMessage NVARCHAR(4000);
+    DECLARE @ErrorSeverity INT;
+    DECLARE @ErrorState INT;
+    DECLARE @CurrentTable NVARCHAR(50);
+    DECLARE @SuccessCount INT = 0;
+    DECLARE @ErrorCount INT = 0;
+
+    -- Log start
+    PRINT '========================================';
+    PRINT 'STAGING PROCESS STARTED';
+    PRINT 'Start Time: ' + CONVERT(VARCHAR, @StartTime, 120);
+    PRINT 'Truncate Mode: ' + CASE WHEN @TruncateBeforeInsert = 1 THEN 'YES' ELSE 'NO' END;
+    PRINT 'Target Table: ' + ISNULL(@TableName, 'ALL TABLES');
+    PRINT '========================================';
+    PRINT '';
+
+    -- =====================================================
+    -- 1. TPOL --> SI_TPOL_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TPOL')
+    BEGIN
+        SET @CurrentTable = 'TPOL';
+        BEGIN TRY
+            PRINT 'Processing: TPOL --> SI_TPOL_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TPOL_SF];
+                PRINT '  - Table SI_TPOL_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TPOL_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TPOL];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 2. TCU --> SI_TCU_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TCU')
+    BEGIN
+        SET @CurrentTable = 'TCU';
+        BEGIN TRY
+            PRINT 'Processing: TCU --> SI_TCU_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TCU_SF];
+                PRINT '  - Table SI_TCU_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TCU_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCU];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 3. TEDIT --> SI_TEDIT_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TEDIT')
+    BEGIN
+        SET @CurrentTable = 'TEDIT';
+        BEGIN TRY
+            PRINT 'Processing: TEDIT --> SI_TEDIT_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TEDIT_SF];
+                PRINT '  - Table SI_TEDIT_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TEDIT_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TEDIT];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 4. TUHCO --> SI_TUHCO_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TUHCO')
+    BEGIN
+        SET @CurrentTable = 'TUHCO';
+        BEGIN TRY
+            PRINT 'Processing: TUHCO --> SI_TUHCO_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TUHCO_SF];
+                PRINT '  - Table SI_TUHCO_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TUHCO_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TUHCO];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 5. TCLNM --> SI_TCLNM_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TCLNM')
+    BEGIN
+        SET @CurrentTable = 'TCLNM';
+        BEGIN TRY
+            PRINT 'Processing: TCLNM --> SI_TCLNM_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TCLNM_SF];
+                PRINT '  - Table SI_TCLNM_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TCLNM_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCLNM];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 6. TCVG --> SI_TCVG_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TCVG')
+    BEGIN
+        SET @CurrentTable = 'TCVG';
+        BEGIN TRY
+            PRINT 'Processing: TCVG --> SI_TCVG_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TCVG_SF];
+                PRINT '  - Table SI_TCVG_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TCVG_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCVG];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 7. TCLIC --> SI_TCLIC_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TCLIC')
+    BEGIN
+        SET @CurrentTable = 'TCLIC';
+        BEGIN TRY
+            PRINT 'Processing: TCLIC --> SI_TCLIC_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TCLIC_SF];
+                PRINT '  - Table SI_TCLIC_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TCLIC_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCLIC];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 8. TCRCD --> SI_TCRCD_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TCRCD')
+    BEGIN
+        SET @CurrentTable = 'TCRCD';
+        BEGIN TRY
+            PRINT 'Processing: TCRCD --> SI_TCRCD_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TCRCD_SF];
+                PRINT '  - Table SI_TCRCD_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TCRCD_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCRCD];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 9. TBNKA --> SI_TBNKA_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TBNKA')
+    BEGIN
+        SET @CurrentTable = 'TBNKA';
+        BEGIN TRY
+            PRINT 'Processing: TBNKA --> SI_TBNKA_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TBNKA_SF];
+                PRINT '  - Table SI_TBNKA_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TBNKA_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TBNKA];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 10. TRSTB --> SI_TRSTB_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TRSTB')
+    BEGIN
+        SET @CurrentTable = 'TRSTB';
+        BEGIN TRY
+            PRINT 'Processing: TRSTB --> SI_TRSTB_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TRSTB_SF];
+                PRINT '  - Table SI_TRSTB_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TRSTB_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TRSTB];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 11. TBENE --> SI_TBENE_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TBENE')
+    BEGIN
+        SET @CurrentTable = 'TBENE';
+        BEGIN TRY
+            PRINT 'Processing: TBENE --> SI_TBENE_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TBENE_SF];
+                PRINT '  - Table SI_TBENE_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TBENE_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TBENE];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 12. TCLIB --> SI_TCLIB_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TCLIB')
+    BEGIN
+        SET @CurrentTable = 'TCLIB';
+        BEGIN TRY
+            PRINT 'Processing: TCLIB --> SI_TCLIB_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TCLIB_SF];
+                PRINT '  - Table SI_TCLIB_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TCLIB_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TCLIB];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- 13. TPOLW --> SI_TPOLW_SF
+    -- =====================================================
+    IF (@TableName IS NULL OR @TableName = 'TPOLW')
+    BEGIN
+        SET @CurrentTable = 'TPOLW';
+        BEGIN TRY
+            PRINT 'Processing: TPOLW --> SI_TPOLW_SF...';
+
+            -- Truncate jika diminta
+            IF @TruncateBeforeInsert = 1
+            BEGIN
+                TRUNCATE TABLE [dbo].[SI_TPOLW_SF];
+                PRINT '  - Table SI_TPOLW_SF truncated.';
+            END
+
+            -- Insert data
+            INSERT INTO [dbo].[SI_TPOLW_SF]
+            SELECT *
+            FROM [UDING602_SV80621].[UDING602].[UDING602].[TPOLW];
+
+            SET @RowCount = @@ROWCOUNT;
+            SET @TotalRows = @TotalRows + @RowCount;
+            SET @SuccessCount = @SuccessCount + 1;
+
+            PRINT '  - SUCCESS: ' + CAST(@RowCount AS VARCHAR) + ' rows inserted.';
+            PRINT '';
+        END TRY
+        BEGIN CATCH
+            SET @ErrorCount = @ErrorCount + 1;
+            PRINT '  - ERROR occurred!';
+            PRINT '  - Error Message: ' + ERROR_MESSAGE();
+            PRINT '  - Error Line: ' + CAST(ERROR_LINE() AS VARCHAR);
+            PRINT '';
+        END CATCH
+    END
+
+    -- =====================================================
+    -- SUMMARY
+    -- =====================================================
+    SET @EndTime = GETDATE();
+
+    PRINT '========================================';
+    PRINT 'STAGING PROCESS COMPLETED';
+    PRINT '========================================';
+    PRINT 'End Time: ' + CONVERT(VARCHAR, @EndTime, 120);
+    PRINT 'Duration: ' + CAST(DATEDIFF(SECOND, @StartTime, @EndTime) AS VARCHAR) + ' seconds';
+    PRINT 'Total Tables Processed: ' + CAST((@SuccessCount + @ErrorCount) AS VARCHAR);
+    PRINT 'Successful: ' + CAST(@SuccessCount AS VARCHAR);
+    PRINT 'Failed: ' + CAST(@ErrorCount AS VARCHAR);
+    PRINT 'Total Rows Inserted: ' + CAST(@TotalRows AS VARCHAR);
+    PRINT '========================================';
+
+    SET NOCOUNT OFF;
+END
+GO
+
+-- =====================================================
+-- CARA PENGGUNAAN / USAGE EXAMPLES
+-- =====================================================
+
+-- 1. Insert semua table TANPA truncate
+-- EXEC [dbo].[SP_STAGING_DB2_TO_SQLSERVER] @TruncateBeforeInsert = 0;
+
+-- 2. Insert semua table DENGAN truncate
+-- EXEC [dbo].[SP_STAGING_DB2_TO_SQLSERVER] @TruncateBeforeInsert = 1;
+
+-- 3. Insert table spesifik TANPA truncate
+-- EXEC [dbo].[SP_STAGING_DB2_TO_SQLSERVER] @TruncateBeforeInsert = 0, @TableName = 'TPOL';
+
+-- 4. Insert table spesifik DENGAN truncate
+-- EXEC [dbo].[SP_STAGING_DB2_TO_SQLSERVER] @TruncateBeforeInsert = 1, @TableName = 'TCU';
+
+PRINT 'Stored Procedure [SP_STAGING_DB2_TO_SQLSERVER] created successfully!';
+GO
