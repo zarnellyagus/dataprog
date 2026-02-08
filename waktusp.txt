@@ -1,0 +1,41 @@
+-- FULL SPEED MODE (Target: 15 minutes)
+EXEC dbo.usp_Load_BigData_DB2_Ultimate
+    @EnableParallel = 1,
+    @DropIndexesBeforeLoad = 1,
+    @DisableConstraints = 1,
+    @UseSimpleRecovery = 1,
+    @BatchSize = 500000
+
+-- Or simply (uses all defaults):
+EXEC dbo.usp_Load_BigData_DB2_Ultimate
+
+
+USE msdb
+GO
+
+EXEC sp_add_job 
+    @job_name = 'BigData_DB2_Load_15Min',
+    @enabled = 1,
+    @description = 'Ultimate fast load of 13 tables from DB2 - Target 15 min'
+
+EXEC sp_add_jobstep
+    @job_name = 'BigData_DB2_Load_15Min',
+    @step_name = 'Execute Ultimate Load',
+    @subsystem = 'TSQL',
+    @database_name = 'NDIBOARD33',
+    @command = 'EXEC dbo.usp_Load_BigData_DB2_Ultimate',
+    @retry_attempts = 1,
+    @retry_interval = 10
+
+EXEC sp_add_schedule
+    @schedule_name = 'Daily_2AM',
+    @freq_type = 4,
+    @active_start_time = 020000
+
+EXEC sp_attach_schedule
+    @job_name = 'BigData_DB2_Load_15Min',
+    @schedule_name = 'Daily_2AM'
+
+EXEC sp_add_jobserver 
+    @job_name = 'BigData_DB2_Load_15Min'
+GO
