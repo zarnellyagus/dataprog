@@ -1,0 +1,42 @@
+CREATE OR ALTER PROCEDURE dbo.usp_LoadTPOL_FromDB2
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    DECLARE @StartTime DATETIME = GETDATE()
+    DECLARE @RowCount INT
+    
+    BEGIN TRY
+        BEGIN TRANSACTION
+        
+        -- Step 1: Truncate staging table
+        TRUNCATE TABLE NDIBOARD33.dbo.SI_TPOL_SF
+        
+        -- Step 2: Insert dengan OPENQUERY dan TABLOCK
+        INSERT INTO NDIBOARD33.dbo.SI_TPOL_SF WITH (TABLOCK)
+        SELECT * 
+        FROM OPENQUERY(UDING602_SV80621, 
+        'SELECT * FROM SCHEMA.TPOL')
+        
+        SET @RowCount = @@ROWCOUNT
+        
+        COMMIT TRANSACTION
+        
+        -- Log success
+        PRINT 'Successfully loaded ' + CAST(@RowCount AS VARCHAR(20)) + ' rows'
+        PRINT 'Duration: ' + CAST(DATEDIFF(SECOND, @StartTime, GETDATE()) AS VARCHAR(10)) + ' seconds'
+        
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION
+            
+        -- Error handling
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE()
+        DECLARE @ErrorSeverity INT = ERROR_SEVERITY()
+        DECLARE @ErrorState INT = ERROR_STATE()
+        
+        RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState)
+    END CATCH
+END
+GO
