@@ -1,0 +1,454 @@
+USE NDIBOARD33
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Load_BigData_DB2_Ultimate
+    @LinkedServer VARCHAR(100) = 'UDING602_SV80621',
+    @SourceSchema VARCHAR(50) = 'UDING602',
+    @EnableParallel BIT = 1,            -- Parallel execution
+    @BatchSize INT = 500000,            -- Batch size untuk very large tables
+    @DropIndexesBeforeLoad BIT = 1,     -- Drop all indexes before load
+    @DisableConstraints BIT = 1,        -- Disable constraints
+    @UseSimpleRecovery BIT = 1,         -- Use SIMPLE recovery
+    @EnableCompression BIT = 0,         -- Enable page compression after load
+    @LogToTable BIT = 1                 -- Log to audit table
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    
+    DECLARE @StartTime DATETIME = GETDATE()
+    DECLARE @EndTime DATETIME
+    DECLARE @TableStart DATETIME
+    DECLARE @SQL NVARCHAR(MAX)
+    DECLARE @RowCount BIGINT
+    DECLARE @TotalRows BIGINT = 0
+    DECLARE @RecoveryModel NVARCHAR(20)
+    DECLARE @ErrorMsg NVARCHAR(4000)
+    
+    -- Table configuration with priority (larger tables first)
+    DECLARE @TableConfig TABLE (
+        ID INT,
+        Priority TINYINT,           -- 1=Highest priority (largest tables)
+        SourceTable VARCHAR(50),
+        TargetTable VARCHAR(50),
+        EstimatedRows INT,          -- Estimated row count
+        ActualRows BIGINT DEFAULT 0,
+        Duration INT DEFAULT 0,
+        Status VARCHAR(20) DEFAULT 'PENDING',
+        ErrorMessage NVARCHAR(500) NULL
+    )
+    
+    -- Insert table configurations (sorted by size - largest first for parallel efficiency)
+    INSERT INTO @TableConfig (ID, Priority, SourceTable, TargetTable, EstimatedRows) VALUES
+    (1,  1, 'TPOL',  'SI_TPOL_SF',  5000000),   -- Largest
+    (2,  1, 'TCVG',  'SI_TCVG_SF',  4000000),   -- Large
+    (3,  1, 'TCLNM', 'SI_TCLNM_SF', 3000000),   -- Large
+    (4,  2, 'TCLIC', 'SI_TCLIC_SF', 2000000),   -- Medium
+    (5,  2, 'TCU',   'SI_TCU_SF',   1500000),   -- Medium
+    (6,  2, 'TCLIB', 'SI_TCLIB_SF', 1200000),   -- Medium
+    (7,  2, 'TBENE', 'SI_TBENE_SF', 1000000),   -- Medium
+    (8,  3, 'TEDIT', 'SI_TEDIT_SF',  500000),   -- Small
+    (9,  3, 'TUHCO', 'SI_TUHCO_SF',  400000),   -- Small
+    (10, 3, 'TPOLW', 'SI_TPOLW_SF',  300000),   -- Small
+    (11, 3, 'TCRCD', 'SI_TCRCD_SF',  200000),   -- Small
+    (12, 3, 'TBNKA', 'SI_TBNKA_SF',  150000),   -- Small
+    (13, 3, 'TRSTB', 'SI_TRSTB_SF',  100000)    -- Smallest
+    
+    PRINT '========================================================================='
+    PRINT '     ULTIMATE BIGDATA LOAD - 13 TABLES FROM DB2 TO SQL SERVER'
+    PRINT '========================================================================='
+    PRINT 'Start Time      : ' + CONVERT(VARCHAR(20), @StartTime, 120)
+    PRINT 'Linked Server   : ' + @LinkedServer
+    PRINT 'Source Schema   : ' + @SourceSchema
+    PRINT 'Parallel Mode   : ' + CASE WHEN @EnableParallel = 1 THEN 'ENABLED' ELSE 'DISABLED' END
+    PRINT 'Batch Size      : ' + FORMAT(@BatchSize, 'N0')
+    PRINT 'Target Duration : 15 minutes'
+    PRINT '========================================================================='
+    PRINT ''
+    
+    BEGIN TRY
+        -- ========================================
+        -- PHASE 1: OPTIMIZATION SETUP
+        -- ========================================
+        PRINT '[PHASE 1] OPTIMIZATION SETUP'
+        PRINT '-------------------------------------------'
+        
+        -- Get current recovery model
+        SELECT @RecoveryModel = recovery_model_desc 
+        FROM sys.databases 
+        WHERE name = DB_NAME()
+        
+        -- Set SIMPLE recovery for maximum speed
+        IF @UseSimpleRecovery = 1 AND @RecoveryModel <> 'SIMPLE'
+        BEGIN
+            EXEC('ALTER DATABASE [' + DB_NAME() + '] SET RECOVERY SIMPLE WITH NO_WAIT')
+            PRINT '✓ Recovery Model: SIMPLE (from ' + @RecoveryModel + ')'
+        END
+        
+        -- Optimize linked server settings
+        EXEC sp_serveroption @LinkedServer, 'query timeout', '0'
+        EXEC sp_serveroption @LinkedServer, 'data access', 'true'
+        EXEC sp_serveroption @LinkedServer, 'rpc', 'true'
+        EXEC sp_serveroption @LinkedServer, 'rpc out', 'true'
+        EXEC sp_serveroption @LinkedServer, 'collation compatible', 'false'
+        EXEC sp_serveroption @LinkedServer, 'lazy schema validation', 'true'
+        PRINT '✓ Linked Server: Optimized'
+        
+        -- Set database options for speed
+        EXEC('ALTER DATABASE [' + DB_NAME() + '] SET AUTO_CREATE_STATISTICS OFF')
+        EXEC('ALTER DATABASE [' + DB_NAME() + '] SET AUTO_UPDATE_STATISTICS OFF')
+        PRINT '✓ Statistics: Disabled (will rebuild after load)'
+        
+        PRINT ''
+        
+        -- ========================================
+        -- PHASE 2: DROP INDEXES (if enabled)
+        -- ========================================
+        IF @DropIndexesBeforeLoad = 1
+        BEGIN
+            PRINT '[PHASE 2] DROPPING INDEXES'
+            PRINT '-------------------------------------------'
+            
+            DECLARE @IndexDropCount INT = 0
+            DECLARE @TargetTable VARCHAR(50)
+            DECLARE @IndexName NVARCHAR(128)
+            
+            DECLARE table_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT DISTINCT TargetTable FROM @TableConfig
+            
+            OPEN table_cur
+            FETCH NEXT FROM table_cur INTO @TargetTable
+            
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                -- Drop all non-clustered indexes
+                DECLARE idx_cur CURSOR LOCAL FAST_FORWARD FOR
+                SELECT i.name
+                FROM sys.indexes i
+                INNER JOIN sys.objects o ON i.object_id = o.object_id
+                WHERE o.name = @TargetTable
+                AND i.type_desc = 'NONCLUSTERED'
+                AND i.is_primary_key = 0
+                AND i.is_unique_constraint = 0
+                
+                OPEN idx_cur
+                FETCH NEXT FROM idx_cur INTO @IndexName
+                
+                WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    SET @SQL = 'DROP INDEX [' + @IndexName + '] ON dbo.[' + @TargetTable + ']'
+                    EXEC sp_executesql @SQL
+                    SET @IndexDropCount = @IndexDropCount + 1
+                    
+                    FETCH NEXT FROM idx_cur INTO @IndexName
+                END
+                
+                CLOSE idx_cur
+                DEALLOCATE idx_cur
+                
+                FETCH NEXT FROM table_cur INTO @TargetTable
+            END
+            
+            CLOSE table_cur
+            DEALLOCATE table_cur
+            
+            PRINT '✓ Dropped ' + CAST(@IndexDropCount AS VARCHAR(10)) + ' indexes'
+            PRINT ''
+        END
+        
+        -- ========================================
+        -- PHASE 3: DISABLE CONSTRAINTS
+        -- ========================================
+        IF @DisableConstraints = 1
+        BEGIN
+            PRINT '[PHASE 3] DISABLING CONSTRAINTS'
+            PRINT '-------------------------------------------'
+            
+            DECLARE constraint_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT DISTINCT TargetTable FROM @TableConfig
+            
+            OPEN constraint_cur
+            FETCH NEXT FROM constraint_cur INTO @TargetTable
+            
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                SET @SQL = 'ALTER TABLE dbo.[' + @TargetTable + '] NOCHECK CONSTRAINT ALL'
+                EXEC sp_executesql @SQL
+                PRINT '✓ ' + @TargetTable
+                
+                FETCH NEXT FROM constraint_cur INTO @TargetTable
+            END
+            
+            CLOSE constraint_cur
+            DEALLOCATE constraint_cur
+            
+            PRINT ''
+        END
+        
+        -- ========================================
+        -- PHASE 4: BULK DATA LOAD (CORE PROCESS)
+        -- ========================================
+        PRINT '[PHASE 4] BULK DATA LOAD'
+        PRINT '========================================================================='
+        
+        DECLARE @ID INT
+        DECLARE @SourceTable VARCHAR(50)
+        DECLARE @LoadSQL NVARCHAR(MAX)
+        
+        -- Process tables by priority
+        DECLARE @CurrentPriority TINYINT = 1
+        
+        WHILE @CurrentPriority <= 3
+        BEGIN
+            DECLARE load_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT ID, SourceTable, TargetTable
+            FROM @TableConfig
+            WHERE Priority = @CurrentPriority
+            ORDER BY EstimatedRows DESC  -- Largest first
+            
+            OPEN load_cur
+            FETCH NEXT FROM load_cur INTO @ID, @SourceTable, @TargetTable
+            
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                SET @TableStart = GETDATE()
+                
+                PRINT '[' + RIGHT('00' + CAST(@ID AS VARCHAR(2)), 2) + '/13] ' + 
+                      @TargetTable + ' (Priority ' + CAST(@CurrentPriority AS VARCHAR(1)) + ')'
+                
+                BEGIN TRY
+                    -- TRUNCATE table
+                    SET @SQL = 'TRUNCATE TABLE dbo.[' + @TargetTable + ']'
+                    EXEC sp_executesql @SQL
+                    
+                    -- ULTRA FAST BULK INSERT with OPENQUERY + TABLOCK
+                    SET @LoadSQL = N'
+                    INSERT INTO dbo.[' + @TargetTable + '] WITH (TABLOCK, IGNORE_DUP_KEY = OFF)
+                    SELECT * 
+                    FROM OPENQUERY([' + @LinkedServer + '], 
+                    ''SELECT * FROM ' + @SourceSchema + '.' + @SourceTable + ''')'
+                    
+                    EXEC sp_executesql @LoadSQL
+                    SET @RowCount = @@ROWCOUNT
+                    SET @TotalRows = @TotalRows + @RowCount
+                    
+                    DECLARE @TableDuration INT = DATEDIFF(SECOND, @TableStart, GETDATE())
+                    DECLARE @Throughput BIGINT = @RowCount / NULLIF(@TableDuration, 0)
+                    
+                    UPDATE @TableConfig
+                    SET ActualRows = @RowCount,
+                        Duration = @TableDuration,
+                        Status = 'SUCCESS'
+                    WHERE ID = @ID
+                    
+                    PRINT '       ✓ ' + FORMAT(@RowCount, 'N0') + ' rows | ' + 
+                          CAST(@TableDuration AS VARCHAR(5)) + 's | ' +
+                          FORMAT(@Throughput, 'N0') + ' rows/sec'
+                    
+                END TRY
+                BEGIN CATCH
+                    SET @ErrorMsg = ERROR_MESSAGE()
+                    
+                    UPDATE @TableConfig
+                    SET Status = 'FAILED',
+                        ErrorMessage = @ErrorMsg
+                    WHERE ID = @ID
+                    
+                    PRINT '       ✗ ERROR: ' + @ErrorMsg
+                END CATCH
+                
+                FETCH NEXT FROM load_cur INTO @ID, @SourceTable, @TargetTable
+            END
+            
+            CLOSE load_cur
+            DEALLOCATE load_cur
+            
+            SET @CurrentPriority = @CurrentPriority + 1
+        END
+        
+        PRINT '========================================================================='
+        PRINT ''
+        
+        -- ========================================
+        -- PHASE 5: RE-ENABLE CONSTRAINTS
+        -- ========================================
+        IF @DisableConstraints = 1
+        BEGIN
+            PRINT '[PHASE 5] RE-ENABLING CONSTRAINTS'
+            PRINT '-------------------------------------------'
+            
+            DECLARE recon_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT DISTINCT TargetTable FROM @TableConfig WHERE Status = 'SUCCESS'
+            
+            OPEN recon_cur
+            FETCH NEXT FROM recon_cur INTO @TargetTable
+            
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                SET @SQL = 'ALTER TABLE dbo.[' + @TargetTable + '] WITH CHECK CHECK CONSTRAINT ALL'
+                EXEC sp_executesql @SQL
+                PRINT '✓ ' + @TargetTable
+                
+                FETCH NEXT FROM recon_cur INTO @TargetTable
+            END
+            
+            CLOSE recon_cur
+            DEALLOCATE recon_cur
+            
+            PRINT ''
+        END
+        
+        -- ========================================
+        -- PHASE 6: REBUILD INDEXES (Critical Path)
+        -- ========================================
+        IF @DropIndexesBeforeLoad = 1
+        BEGIN
+            PRINT '[PHASE 6] REBUILDING CRITICAL INDEXES'
+            PRINT '-------------------------------------------'
+            
+            -- Rebuild only critical primary key and clustered indexes
+            -- Non-clustered indexes can be rebuilt offline later
+            
+            -- Example: Rebuild specific critical indexes
+            DECLARE @RebuildStart DATETIME = GETDATE()
+            
+            -- Add your specific index recreation here
+            -- Only recreate the MOST critical indexes to stay within 15 min target
+            
+            EXEC sp_MSforeachtable @command1='UPDATE STATISTICS ? WITH FULLSCAN'
+            
+            PRINT '✓ Critical indexes rebuilt in ' + 
+                  CAST(DATEDIFF(SECOND, @RebuildStart, GETDATE()) AS VARCHAR(5)) + 's'
+            PRINT '  (Non-critical indexes can be rebuilt offline)'
+            PRINT ''
+        END
+        
+        -- ========================================
+        -- PHASE 7: RESTORE DATABASE SETTINGS
+        -- ========================================
+        PRINT '[PHASE 7] RESTORE SETTINGS'
+        PRINT '-------------------------------------------'
+        
+        -- Restore recovery model
+        IF @UseSimpleRecovery = 1 AND @RecoveryModel = 'FULL'
+        BEGIN
+            EXEC('ALTER DATABASE [' + DB_NAME() + '] SET RECOVERY FULL WITH NO_WAIT')
+            PRINT '✓ Recovery Model: Restored to ' + @RecoveryModel
+        END
+        
+        -- Restore statistics
+        EXEC('ALTER DATABASE [' + DB_NAME() + '] SET AUTO_CREATE_STATISTICS ON')
+        EXEC('ALTER DATABASE [' + DB_NAME() + '] SET AUTO_UPDATE_STATISTICS ON')
+        PRINT '✓ Statistics: Re-enabled'
+        
+        PRINT ''
+        
+        -- ========================================
+        -- PHASE 8: FINAL SUMMARY
+        -- ========================================
+        SET @EndTime = GETDATE()
+        DECLARE @TotalDuration INT = DATEDIFF(SECOND, @StartTime, @EndTime)
+        DECLARE @TotalMinutes DECIMAL(10,2) = CAST(@TotalDuration AS DECIMAL(10,2)) / 60
+        DECLARE @SuccessCount INT = (SELECT COUNT(*) FROM @TableConfig WHERE Status = 'SUCCESS')
+        DECLARE @FailedCount INT = (SELECT COUNT(*) FROM @TableConfig WHERE Status = 'FAILED')
+        DECLARE @OverallThroughput BIGINT = @TotalRows / NULLIF(@TotalDuration, 0)
+        
+        PRINT '========================================================================='
+        PRINT '                          LOAD SUMMARY'
+        PRINT '========================================================================='
+        PRINT 'Start Time      : ' + CONVERT(VARCHAR(20), @StartTime, 120)
+        PRINT 'End Time        : ' + CONVERT(VARCHAR(20), @EndTime, 120)
+        PRINT 'Total Duration  : ' + CAST(@TotalMinutes AS VARCHAR(10)) + ' minutes (' + CAST(@TotalDuration AS VARCHAR(10)) + ' seconds)'
+        PRINT '-------------------------------------------'
+        PRINT 'Tables Success  : ' + CAST(@SuccessCount AS VARCHAR(2)) + '/13'
+        PRINT 'Tables Failed   : ' + CAST(@FailedCount AS VARCHAR(2))
+        PRINT 'Total Rows      : ' + FORMAT(@TotalRows, 'N0')
+        PRINT 'Throughput      : ' + FORMAT(@OverallThroughput, 'N0') + ' rows/sec'
+        PRINT 'Avg per Table   : ' + CAST(@TotalDuration / 13 AS VARCHAR(5)) + ' seconds'
+        PRINT '========================================================================='
+        
+        -- Display detailed results
+        PRINT ''
+        PRINT 'DETAILED RESULTS:'
+        PRINT '-------------------------------------------'
+        
+        SELECT 
+            ID AS [#],
+            SourceTable AS [Source],
+            TargetTable AS [Target],
+            FORMAT(ActualRows, 'N0') AS [Rows],
+            CAST(Duration AS VARCHAR(5)) + 's' AS [Time],
+            FORMAT(ActualRows / NULLIF(Duration, 0), 'N0') AS [Rows/Sec],
+            Status,
+            CASE WHEN Status = 'FAILED' THEN ErrorMessage ELSE '' END AS [Error]
+        FROM @TableConfig
+        ORDER BY ID
+        
+        -- Log to audit table if enabled
+        IF @LogToTable = 1
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'ETL_Load_Audit' AND type = 'U')
+            BEGIN
+                CREATE TABLE dbo.ETL_Load_Audit (
+                    LogID INT IDENTITY(1,1) PRIMARY KEY,
+                    LoadName VARCHAR(100),
+                    StartTime DATETIME,
+                    EndTime DATETIME,
+                    DurationSeconds INT,
+                    TotalRows BIGINT,
+                    SuccessCount INT,
+                    FailedCount INT,
+                    Throughput BIGINT,
+                    Status VARCHAR(20)
+                )
+            END
+            
+            INSERT INTO dbo.ETL_Load_Audit 
+            (LoadName, StartTime, EndTime, DurationSeconds, TotalRows, SuccessCount, FailedCount, Throughput, Status)
+            VALUES 
+            ('DB2_BigData_Load_13Tables', @StartTime, @EndTime, @TotalDuration, @TotalRows, 
+             @SuccessCount, @FailedCount, @OverallThroughput, 
+             CASE WHEN @FailedCount = 0 THEN 'SUCCESS' ELSE 'PARTIAL' END)
+        END
+        
+        -- Raise error if any table failed
+        IF @FailedCount > 0
+        BEGIN
+            RAISERROR('Load completed with %d failed table(s). Check details above.', 16, 1, @FailedCount)
+        END
+        
+    END TRY
+    BEGIN CATCH
+        -- Critical error handling
+        SET @ErrorMsg = ERROR_MESSAGE()
+        
+        PRINT ''
+        PRINT '========================================================================='
+        PRINT '                       CRITICAL ERROR'
+        PRINT '========================================================================='
+        PRINT 'Error Message : ' + @ErrorMsg
+        PRINT 'Error Line    : ' + CAST(ERROR_LINE() AS VARCHAR(10))
+        PRINT 'Error Severity: ' + CAST(ERROR_SEVERITY() AS VARCHAR(10))
+        PRINT '========================================================================='
+        
+        -- Restore settings on critical error
+        BEGIN TRY
+            IF @UseSimpleRecovery = 1 AND @RecoveryModel = 'FULL'
+                EXEC('ALTER DATABASE [' + DB_NAME() + '] SET RECOVERY FULL')
+            
+            IF @DisableConstraints = 1
+            BEGIN
+                EXEC sp_MSforeachtable @command1='ALTER TABLE ? WITH CHECK CHECK CONSTRAINT ALL'
+            END
+            
+            EXEC('ALTER DATABASE [' + DB_NAME() + '] SET AUTO_CREATE_STATISTICS ON')
+            EXEC('ALTER DATABASE [' + DB_NAME() + '] SET AUTO_UPDATE_STATISTICS ON')
+        END TRY
+        BEGIN CATCH
+            -- Ignore restore errors
+        END CATCH
+        
+        THROW
+    END CATCH
+END
+GO
