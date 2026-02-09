@@ -1,0 +1,392 @@
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace SalesforcAPI.Repositories
+{
+    
+    public class FundIquiryActifityRepository : IFundIquiryActifityRepository
+    {
+        
+        private readonly string _connectionString;
+        private readonly ILogger<FundIquiryActifityRepository> _logger;
+     
+        private readonly IMemoryCache _cache;
+        
+  
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(5);
+
+        public FundIquiryActifityRepository(
+            IConfiguration configuration,
+            ILogger<FundIquiryActifityRepository> logger,
+            IMemoryCache cache)
+        {
+            // Validasi: configuration tidak boleh null
+            if (configuration == null)
+                throw new ArgumentNullException(nameof(configuration));
+            
+            // Ambil connection string "NDIBOARD33" dari appsettings.json
+            // Jika tidak ada, throw exception (fail-fast principle)
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                ?? throw new ArgumentNullException("Connection string NDIBOARD33 not found");
+            
+            // Validasi: logger tidak boleh null
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            
+            // Validasi: cache tidak boleh null
+            _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+        }
+
+       
+        public async Task<PagedResult<FundIquiryActifity>?> GetFundIquiryActifityAsync(
+            FundIquiryActifityRequest request)
+        {
+          
+            var sw = Stopwatch.StartNew();
+
+            // Validasi 1: PolicyId tidak boleh kosong
+            if (string.IsNullOrWhiteSpace(request.PolicyId))
+                throw new ArgumentException("PolicyId cannot be null or empty", nameof(request.PolicyId));
+
+            // Validasi 2: Normalisasi PageNumber (minimal 1)
+            if (request.PageNumber <= 0) 
+                request.PageNumber = 1;
+            
+            // Validasi 3: Normalisasi PageSize (minimal 10)
+            if (request.PageSize <= 0) 
+                request.PageSize = 10;
+            
+            // Validasi 4: Batasi PageSize maksimal 100 (mencegah large data fetch)
+            if (request.PageSize > 100) 
+                request.PageSize = 100;
+
+            // Generate cache key yang unik untuk setiap kombinasi PolicyId + Page + Size
+            // Format: "FundActivity_POL12345_P1_S10"
+            var cacheKey = $"FundActivity_{request.PolicyId}_P{request.PageNumber}_S{request.PageSize}";
+
+            // ========================================
+            // PHASE 2: CHECK DATA CACHE
+            // ========================================
+            
+            // Coba ambil data dari cache
+            // TryGetValue return true jika data ada di cache
+            if (_cache.TryGetValue<PagedResult<FundIquiryActifity>>(cacheKey, out var cachedResult))
+            {
+                // CACHE HIT - Data ditemukan di cache
+                // Ini adalah jalur tercepat (< 1ms)
+                _logger.LogInformation(
+                    "Cache HIT PolicyId={PolicyId} Page={Page} Time={Elapsed}ms",
+                    request.PolicyId, request.PageNumber, sw.ElapsedMilliseconds);
+                
+                return cachedResult;
+                // ⚡ Response time: ~0.3-0.5ms
+                // Tidak perlu query database sama sekali
+            }
+
+            // ========================================
+            // PHASE 3: CHECK 404 CACHE
+            // ========================================
+            
+            // Cache key khusus untuk PolicyId yang tidak ditemukan
+            // Format: "PolicyNotFound_POL12345"
+            var notFoundCacheKey = $"PolicyNotFound_{request.PolicyId}";
+            
+            // Cek apakah PolicyId ini pernah dicari dan tidak ditemukan sebelumnya
+            if (_cache.TryGetValue<bool>(notFoundCacheKey, out _))
+            {
+                // CACHE HIT untuk 404 - PolicyId pernah dicari dan tidak ada
+                sw.Stop();
+                _logger.LogInformation(
+                    "Cache HIT - Policy NOT FOUND PolicyId={PolicyId} Time={Elapsed}ms",
+                    request.PolicyId, sw.ElapsedMilliseconds);
+                
+                return null;
+                // ⚡ Response time: ~0.3ms
+                // Controller akan return HTTP 404
+                // Menghindari query database berulang untuk PolicyId yang tidak ada
+            }
+
+            // ========================================
+            // PHASE 4: DATABASE OPERATIONS
+            // ========================================
+            
+            try
+            {
+                // Buat koneksi ke SQL Server
+                // 'await using' memastikan koneksi ditutup otomatis setelah selesai
+                await using var connection = new SqlConnection(_connectionString);
+                
+                // Buka koneksi database
+                // ⏱️ Time: ~1-2ms
+                await connection.OpenAsync();
+
+                // ========================================
+                // QUERY 1: VALIDATE POLICY IN DWM_POLICY
+                // ========================================
+                
+                // Cek apakah PolicyId ada di tabel DWM_POLICY
+                // Ini adalah validasi utama sebelum query data
+                // ⏱️ Time: ~0.2-0.5ms
+                var policyExists = await CheckPolicyExistsInDWMAsync(connection, request.PolicyId);
+                
+                if (!policyExists)
+                {
+                    // ❌ POLICY NOT FOUND - PolicyId tidak ada di DWM_POLICY
+                    
+                    _logger.LogWarning(
+                        "Policy NOT FOUND in DWM_POLICY - PolicyId={PolicyId}",
+                        request.PolicyId);
+
+                    // Simpan hasil NOT FOUND ke cache
+                    // Tujuan: Menghindari query berulang untuk PolicyId yang sama
+                    var notFoundCacheOptions = new MemoryCacheEntryOptions()
+                        .SetSlidingExpiration(TimeSpan.FromMinutes(2))  // Reset timer jika diakses
+                        .SetAbsoluteExpiration(TimeSpan.FromMinutes(5)) // Max 5 menit di cache
+                        .SetPriority(CacheItemPriority.Low);            // Priority rendah (bisa dihapus duluan jika memory penuh)
+
+                    _cache.Set(notFoundCacheKey, true, notFoundCacheOptions);
+
+                    sw.Stop();
+                    _logger.LogInformation(
+                        "Returning NULL for 404 response - PolicyId={PolicyId} Time={Elapsed}ms",
+                        request.PolicyId, sw.ElapsedMilliseconds);
+
+                    return null;
+                    // ⏱️ Total time: ~2-3ms
+                    // Controller akan mapping ke HTTP 404
+                }
+
+                // ========================================
+                // QUERY 2 & 3: GET DATA & COUNT
+                // ========================================
+                
+                // ✅ POLICY FOUND - Lanjutkan ke query data
+                
+                _logger.LogInformation(
+                    "Policy FOUND in DWM_POLICY - PolicyId={PolicyId}, executing data queries",
+                    request.PolicyId);
+
+                // Hitung offset untuk pagination
+                // Contoh: Page 1 Size 10 → offset = 0
+                //         Page 2 Size 10 → offset = 10
+                //         Page 3 Size 10 → offset = 20
+                var offset = (request.PageNumber - 1) * request.PageSize;
+
+                // Build SQL queries
+                var sqlData = BuildDataQuery();   // Query untuk ambil data
+                var sqlCount = BuildCountQuery(); // Query untuk hitung total
+
+                // Execute 2 query secara PARALLEL (bersamaan)
+                // Ini lebih cepat daripada sequential execution
+                
+                // Query 2: Ambil data activity dengan pagination
+                var dataTask = connection.QueryAsync<FundIquiryActifity>(
+                    sqlData,
+                    new
+                    {
+                        PolicyId = request.PolicyId,
+                        PageSize = request.PageSize,
+                        Offset = offset
+                    },
+                    commandTimeout: 30); // Timeout 30 detik
+
+                // Query 3: Hitung total records
+                var countTask = connection.ExecuteScalarAsync<int>(
+                    sqlCount,
+                    new { PolicyId = request.PolicyId },
+                    commandTimeout: 30);
+
+                // Wait sampai kedua query selesai
+                // ⏱️ Time: ~5-8ms (karena parallel)
+                await Task.WhenAll(dataTask, countTask);
+
+                // Ambil hasil dari kedua query
+                var items = (await dataTask).ToList();       // List of FundIquiryActifity
+                var totalRecords = await countTask;          // Total count
+
+                // ========================================
+                // HANDLE EMPTY DATA
+                // ========================================
+                
+                // Check if any fund activity data exists
+                if (totalRecords == 0)
+                {
+                    // ⚠️ POLICY EXISTS BUT NO ACTIVITY DATA
+                    // Policy ada di DWM_POLICY tapi tidak ada data di DWT_FIA
+                    
+                    sw.Stop();
+                    _logger.LogInformation(
+                        "Policy exists but no fund activity data - PolicyId={PolicyId} Time={Elapsed}ms",
+                        request.PolicyId, sw.ElapsedMilliseconds);
+
+                    // Return empty result (bukan null)
+                    // HTTP 200 dengan Items kosong
+                    var emptyResult = new PagedResult<FundIquiryActifity>
+                    {
+                        PageNumber = request.PageNumber,
+                        PageSize = request.PageSize,
+                        TotalRecords = 0,
+                        TotalPages = 0,
+                        Items = new List<FundIquiryActifity>() // Empty list
+                    };
+
+                    // Cache empty result dengan durasi lebih pendek
+                    var emptyCacheOptions = new MemoryCacheEntryOptions()
+                        .SetSlidingExpiration(TimeSpan.FromMinutes(2))  // 2 menit
+                        .SetAbsoluteExpiration(TimeSpan.FromMinutes(10)) // Max 10 menit
+                        .SetPriority(CacheItemPriority.Normal);          // Priority normal
+
+                    _cache.Set(cacheKey, emptyResult, emptyCacheOptions);
+
+                    return emptyResult;
+                    // ⏱️ Total time: ~7-10ms
+                    // Controller akan return HTTP 200 dengan Items: []
+                }
+
+                // ========================================
+                // BUILD SUCCESS RESULT
+                // ========================================
+                
+                // ✅ DATA FOUND - Build PagedResult dengan data
+                
+                // Hitung total pages
+                // Contoh: totalRecords = 25, pageSize = 10
+                //         totalPages = Math.Ceiling(25 / 10.0) = 3 pages
+                var totalPages = (int)Math.Ceiling(totalRecords / (double)request.PageSize);
+
+                var result = new PagedResult<FundIquiryActifity>
+                {
+                    PageNumber = request.PageNumber,    // Current page number
+                    PageSize = request.PageSize,        // Records per page
+                    TotalRecords = totalRecords,        // Total jumlah records di database
+                    TotalPages = totalPages,            // Total jumlah pages
+                    Items = items                       // List data untuk page ini
+                };
+
+                // Cache the successful result
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetSlidingExpiration(_cacheDuration)       // 5 menit (reset jika diakses)
+                    .SetAbsoluteExpiration(TimeSpan.FromMinutes(15)) // Max 15 menit
+                    .SetPriority(CacheItemPriority.High);            // High priority (tidak mudah dihapus)
+
+                _cache.Set(cacheKey, result, cacheOptions);
+
+                sw.Stop();
+                _logger.LogInformation(
+                    "FundActivity SUCCESS - PolicyId={PolicyId} Page={Page}/{TotalPages} Records={Count}/{Total} Time={Elapsed}ms",
+                    request.PolicyId, request.PageNumber, totalPages, items.Count, totalRecords, sw.ElapsedMilliseconds);
+
+                return result;
+                // ⏱️ Total time: ~8-10ms
+                // Controller akan return HTTP 200 dengan data lengkap
+            }
+            
+            // ========================================
+            // EXCEPTION HANDLING
+            // ========================================
+            
+            // Handle SQL Timeout (Error -2)
+            catch (SqlException sqlEx) when (sqlEx.Number == -2)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx, 
+                    "SQL TIMEOUT PolicyId={PolicyId} Time={Elapsed}ms",
+                    request.PolicyId, sw.ElapsedMilliseconds);
+                
+                // Throw TimeoutException untuk di-catch di Controller
+                throw new TimeoutException($"Database timeout for PolicyId '{request.PolicyId}'", sqlEx);
+            }
+            
+            // Handle SQL errors lainnya
+            catch (SqlException sqlEx)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL ERROR PolicyId={PolicyId} ErrorCode={ErrorCode} Time={Elapsed}ms",
+                    request.PolicyId, sqlEx.Number, sw.ElapsedMilliseconds);
+                
+                throw; // Re-throw untuk di-handle di Controller
+            }
+            
+            // Handle unexpected errors
+            catch (Exception ex)
+            {
+                sw.Stop();
+                _logger.LogError(ex,
+                    "ERROR PolicyId={PolicyId} Type={Type} Time={Elapsed}ms",
+                    request.PolicyId, ex.GetType().Name, sw.ElapsedMilliseconds);
+                
+                throw; // Re-throw untuk di-handle di Controller
+            }
+        }
+
+        // ============================================================
+        // SECTION 3: HELPER METHODS
+        // ============================================================
+
+        
+        private static async Task<bool> CheckPolicyExistsInDWMAsync(
+            SqlConnection connection, 
+            string policyId)
+        {
+            const string sql = @"
+SELECT CASE WHEN EXISTS (
+    SELECT 1
+    FROM DWM_POLICY WITH (NOLOCK)
+    WHERE POL_ID = @PolicyId
+) THEN 1 ELSE 0 END";
+
+            // Execute query dan ambil hasil sebagai integer
+            var result = await connection.ExecuteScalarAsync<int>(
+                sql,
+                new { PolicyId = policyId });
+
+            // Return true jika result = 1 (EXISTS)
+            // Return false jika result = 0 (NOT EXISTS)
+            return result == 1;
+            
+          
+        }
+
+      
+        private static string BuildDataQuery()
+        {
+            return @"
+SELECT
+    ISNULL(FI.FIA_EFF_DT, '1900-01-01') AS ActivityEffectiveDate,
+    ISNULL(FI.FIA_SEQ_NUM, 0) AS SequenceNumber,
+    ISNULL(FN.FND_TYP_CD, '') AS ActivityType,
+    CAST(0 AS DECIMAL(18,2)) AS TotalPremiumReceived,
+    ISNULL(FI.FIA_FND_TRXN_AMT, 0) AS NetAmount,
+    ISNULL(FI.FIA_LOAD_AMT, 0) AS TransferCharges
+FROM DWT_FIA FI WITH (NOLOCK)
+LEFT JOIN DWM_FUND FN WITH (NOLOCK) ON FN.FND_ID = FI.FND_ID
+WHERE FI.POL_ID = @PolicyId
+ORDER BY FI.FIA_EFF_DT DESC, FI.FIA_SEQ_NUM DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2);";
+
+          
+        }
+
+        
+        private static string BuildCountQuery()
+        {
+            return @"
+SELECT COUNT_BIG(1)
+FROM DWT_FIA WITH (NOLOCK)
+WHERE POL_ID = @PolicyId;";
+
+          
+        }
+    }
+}
