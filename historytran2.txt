@@ -1,0 +1,369 @@
+using System;
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Caching.Memory;
+using SalesforcAPI.Interfaces;
+using SalesforcAPI.Models;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Diagnostics;
+
+namespace SalesforcAPI.Repositories
+{
+    /// <summary>
+    /// TransactionHistoryRepository - Production Ready
+    /// Returns NULL if policy not found in DWM_POLICY (404)
+    /// Returns dummy data if policy found but no transaction data (200)
+    /// </summary>
+    public class TransactionHistoryRepository : ITransactionHistoryRepository
+    {
+        private readonly string _connectionString;
+        private readonly ILogger<TransactionHistoryRepository> _logger;
+        private readonly IMemoryCache _cache;
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(5);
+
+        public TransactionHistoryRepository(
+            IConfiguration configuration,
+            ILogger<TransactionHistoryRepository> logger,
+            IMemoryCache cache)
+        {
+            _connectionString = configuration.GetConnectionString("NDIBOARD33")
+                ?? throw new ArgumentNullException(nameof(configuration), "Connection string NDIBOARD33 not found.");
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+        }
+
+        public async Task<PagedResponse<TransactionHistoryResponse>?> GetTransactionHistoryAsync(
+            TransactionHistoryPagedRequest request)
+        {
+            var sw = Stopwatch.StartNew();
+
+            // Validate input
+            if (request == null) 
+                throw new ArgumentNullException(nameof(request));
+            
+            if (string.IsNullOrWhiteSpace(request.PolicyID))
+                throw new ArgumentException("PolicyID is required.", nameof(request.PolicyID));
+
+            // Normalize pagination
+            var pageNumber = request.PageNumber <= 0 ? 1 : request.PageNumber;
+            var pageSize = request.PageSize <= 0 ? 10 : request.PageSize;
+            if (pageSize > 100) pageSize = 100; // Limit max page size
+            
+            var offset = (pageNumber - 1) * pageSize;
+
+            var cacheKey = $"TxHistory_{request.PolicyID}_P{pageNumber}_S{pageSize}";
+
+            // ⚡ Check cache first
+            if (_cache.TryGetValue<PagedResponse<TransactionHistoryResponse>>(cacheKey, out var cachedResult))
+            {
+                _logger.LogInformation(
+                    "Cache HIT PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                return cachedResult;
+            }
+
+            // Check for cached 404
+            var notFoundCacheKey = $"PolicyNotFound_{request.PolicyID}";
+            if (_cache.TryGetValue<bool>(notFoundCacheKey, out _))
+            {
+                sw.Stop();
+                _logger.LogInformation(
+                    "Cache HIT - Policy NOT FOUND PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                return null; // Return null untuk 404
+            }
+
+            try
+            {
+                await using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                // STEP 1: Check if policy exists in DWM_POLICY
+                var policyExists = await CheckPolicyExistsInDWMAsync(connection, request.PolicyID);
+                
+                if (!policyExists)
+                {
+                    // ❌ POLICY NOT FOUND → Return NULL → HTTP 404
+                    _logger.LogWarning(
+                        "Policy NOT FOUND in DWM_POLICY - PolicyID={PolicyID}",
+                        request.PolicyID);
+
+                    // Cache not found result
+                    var notFoundCacheOptions = new MemoryCacheEntryOptions()
+                        .SetSlidingExpiration(TimeSpan.FromMinutes(2))
+                        .SetAbsoluteExpiration(TimeSpan.FromMinutes(5))
+                        .SetPriority(CacheItemPriority.Low);
+
+                    _cache.Set(notFoundCacheKey, true, notFoundCacheOptions);
+
+                    sw.Stop();
+                    _logger.LogInformation(
+                        "Returning NULL for 404 response - PolicyID={PolicyID} Time={Elapsed}ms",
+                        request.PolicyID, sw.ElapsedMilliseconds);
+
+                    return null; // Controller akan mapping ke 404
+                }
+
+                // STEP 2: Policy found, execute all queries
+                _logger.LogInformation(
+                    "Policy FOUND in DWM_POLICY - PolicyID={PolicyID}, executing queries",
+                    request.PolicyID);
+
+                var sql = BuildOptimizedQuery();
+                var param = new
+                {
+                    PolicyID = request.PolicyID,
+                    Offset = offset,
+                    PageSize = pageSize
+                };
+
+                using var multi = await connection.QueryMultipleAsync(sql, param, commandTimeout: 120);
+
+                // Read all query results
+                var totalRecords = await multi.ReadSingleOrDefaultAsync<int>();
+                var withdrawal = (await multi.ReadAsync<WithdrawalSummary>()).ToList();
+                var switching = (await multi.ReadAsync<Switching>()).ToList();
+                var detailSwitching = (await multi.ReadAsync<DetailSwitching>()).ToList();
+
+                // ✅ CHECK: If no data in any query, return dummy data
+                if (totalRecords == 0 || 
+                    (withdrawal.Count == 0 && switching.Count == 0 && detailSwitching.Count == 0))
+                {
+                    sw.Stop();
+                    _logger.LogInformation(
+                        "Policy exists but no transaction data - PolicyID={PolicyID} Time={Elapsed}ms, returning dummy data",
+                        request.PolicyID, sw.ElapsedMilliseconds);
+
+                    // Return dummy response
+                    var dummyResponse = CreateDummyResponse(pageNumber, pageSize);
+
+                    // Cache dummy result
+                    var dummyCacheOptions = new MemoryCacheEntryOptions()
+                        .SetSlidingExpiration(TimeSpan.FromMinutes(2))
+                        .SetAbsoluteExpiration(TimeSpan.FromMinutes(10))
+                        .SetPriority(CacheItemPriority.Normal);
+
+                    _cache.Set(cacheKey, dummyResponse, dummyCacheOptions);
+
+                    return dummyResponse; // ✅ HTTP 200 dengan dummy data
+                }
+
+                // ✅ HAS DATA: Build actual response
+                var totalPages = (int)Math.Ceiling(totalRecords / (double)pageSize);
+
+                var data = new TransactionHistoryResponse
+                {
+                    WithdrawalSummary = withdrawal.Count > 0 ? withdrawal : new List<WithdrawalSummary> { CreateDummyWithdrawal() },
+                    SwitchingTransactions = switching.Count > 0 ? switching : new List<Switching> { CreateDummySwitching() },
+                    DetailSwitching = detailSwitching.Count > 0 ? detailSwitching : new List<DetailSwitching> { CreateDummyDetailSwitching() }
+                };
+
+                var result = new PagedResponse<TransactionHistoryResponse>
+                {
+                    Data = data,
+                    PageNumber = pageNumber,
+                    PageSize = pageSize,
+                    TotalRecords = totalRecords,
+                    TotalPages = totalPages
+                };
+
+                // Cache the result
+                var cacheOptions = new MemoryCacheEntryOptions()
+                    .SetSlidingExpiration(_cacheDuration)
+                    .SetAbsoluteExpiration(TimeSpan.FromMinutes(15))
+                    .SetPriority(CacheItemPriority.High);
+
+                _cache.Set(cacheKey, result, cacheOptions);
+
+                sw.Stop();
+                _logger.LogInformation(
+                    "TransactionHistory SUCCESS - PolicyID={PolicyID} Records={Records} Time={Elapsed}ms",
+                    request.PolicyID, totalRecords, sw.ElapsedMilliseconds);
+
+                return result;
+            }
+            catch (SqlException sqlEx) when (sqlEx.Number == -2) // Timeout
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL TIMEOUT PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+
+                throw new TimeoutException(
+                    $"Database timeout for PolicyID '{request.PolicyID}'. Please try again or contact support.",
+                    sqlEx);
+            }
+            catch (SqlException sqlEx)
+            {
+                sw.Stop();
+                _logger.LogError(sqlEx,
+                    "SQL Error PolicyID={PolicyID} ErrorCode={ErrorCode} Time={Elapsed}ms",
+                    request.PolicyID, sqlEx.Number, sw.ElapsedMilliseconds);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                _logger.LogError(ex,
+                    "Error GetTransactionHistoryAsync PolicyID={PolicyID} Time={Elapsed}ms",
+                    request.PolicyID, sw.ElapsedMilliseconds);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Check if policy exists in DWM_POLICY table (PRIMARY VALIDATION)
+        /// </summary>
+        private static async Task<bool> CheckPolicyExistsInDWMAsync(SqlConnection connection, string policyId)
+        {
+            const string sql = @"
+SELECT CASE WHEN EXISTS (
+    SELECT 1 
+    FROM DWM_POLICY WITH (NOLOCK)
+    WHERE POL_ID = @PolicyID
+) THEN 1 ELSE 0 END";
+
+            var result = await connection.ExecuteScalarAsync<int>(
+                sql, 
+                new { PolicyID = policyId });
+
+            return result == 1;
+        }
+
+        /// <summary>
+        /// Create dummy response when no transaction data exists
+        /// </summary>
+        private static PagedResponse<TransactionHistoryResponse> CreateDummyResponse(int pageNumber, int pageSize)
+        {
+            return new PagedResponse<TransactionHistoryResponse>
+            {
+                Data = new TransactionHistoryResponse
+                {
+                    WithdrawalSummary = new List<WithdrawalSummary> { CreateDummyWithdrawal() },
+                    SwitchingTransactions = new List<Switching> { CreateDummySwitching() },
+                    DetailSwitching = new List<DetailSwitching> { CreateDummyDetailSwitching() }
+                },
+                PageNumber = pageNumber,
+                PageSize = pageSize,
+                TotalRecords = 1,
+                TotalPages = 1
+            };
+        }
+
+        /// <summary>
+        /// Create dummy withdrawal summary
+        /// </summary>
+        private static WithdrawalSummary CreateDummyWithdrawal()
+        {
+            return new WithdrawalSummary
+            {
+                PolicyID = "",
+                TotalWithdrawalAmount = 0,
+                WithdrawalEffectiveDate = DateTime.Parse("1900-01-01"),
+                TotalAmount = 0
+            };
+        }
+
+        /// <summary>
+        /// Create dummy switching transaction
+        /// </summary>
+        private static Switching CreateDummySwitching()
+        {
+            return new Switching
+            {
+                ActivityEffectiveDate = DateTime.Parse("1900-01-01"),
+                ActivityType = "",
+                NetAmount = 0,
+                EffectiveDateOfReversal = DateTime.Parse("1900-01-01")
+            };
+        }
+
+        /// <summary>
+        /// Create dummy detail switching
+        /// </summary>
+        private static DetailSwitching CreateDummyDetailSwitching()
+        {
+            return new DetailSwitching
+            {
+                Fund = "",
+                UnitPrice = 0,
+                NetUnitChange = 0,
+                ApproximateNumberOfUnits = 0,
+                FundAccumulationUnit = 0
+            };
+        }
+
+        /// <summary>
+        /// Build optimized query with all 4 queries
+        /// </summary>
+        private static string BuildOptimizedQuery()
+        {
+            return @"
+-- Query 1: Count total CIA records
+SELECT COUNT(1)
+FROM DWT_CIA CIA WITH (NOLOCK)
+WHERE CIA.POL_ID = @PolicyID
+OPTION (MAXDOP 2);
+
+-- Query 2: Withdrawal Summary (paginated)
+WITH RankedWithdrawals AS (
+    SELECT 
+        PL.POL_ID AS PolicyID,
+        ISNULL(CIA.CIA_FND_TRXN_AMT, 0) AS TotalWithdrawalAmount,
+        ISNULL(CIA.CIA_EFF_DT, '1900-01-01') AS WithdrawalEffectiveDate,
+        ISNULL(DCC.CIA_ALLOC_DPOS_AMT, 0) AS TotalAmount,
+        ROW_NUMBER() OVER (
+            PARTITION BY PL.POL_ID 
+            ORDER BY CIA.CIA_EFF_DT DESC
+        ) AS RowNum
+    FROM DWM_POLICY PL WITH (NOLOCK)
+    LEFT JOIN DWT_CIA CIA WITH (NOLOCK) ON CIA.POL_ID = PL.POL_ID
+    LEFT JOIN DWT_CIA_COVERAGE DCC WITH (NOLOCK) 
+        ON DCC.POL_ID = PL.POL_ID 
+        AND DCC.CIA_ID = CIA.CIA_ID
+    WHERE PL.POL_ID = @PolicyID
+)
+SELECT 
+    ISNULL(PolicyID, '') AS PolicyID,
+    TotalWithdrawalAmount,
+    WithdrawalEffectiveDate,
+    TotalAmount
+FROM RankedWithdrawals
+WHERE RowNum > @Offset AND RowNum <= (@Offset + @PageSize)
+ORDER BY WithdrawalEffectiveDate DESC
+OPTION (MAXDOP 2);
+
+-- Query 3: Switching Transactions (paginated)
+SELECT 
+    ISNULL(CIA.CIA_EFF_DT, '1900-01-01') AS ActivityEffectiveDate,
+    ISNULL(CIA.CIA_TYP_CD, '') AS ActivityType,
+    ISNULL(CIA.CIA_FND_TRXN_AMT, 0) AS NetAmount,
+    ISNULL(CIA.CIA_REVRS_PRCES_DT, '1900-01-01') AS EffectiveDateOfReversal
+FROM DWT_CIA CIA WITH (NOLOCK)
+WHERE CIA.POL_ID = @PolicyID
+ORDER BY CIA.CIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2, RECOMPILE);
+
+-- Query 4: Detail Switching (paginated)
+SELECT 
+    ISNULL(FA.FND_ID, '') AS Fund,
+    ISNULL(FP.PURCH_PRIC_1_AMT, 0) AS UnitPrice,
+    ISNULL(FA.FIA_INTG_AUNIT_QTY, 0) AS NetUnitChange,
+    ISNULL(FA.CFN_INTG_AUNIT_QTY, 0) AS ApproximateNumberOfUnits,
+    CAST(0 AS DECIMAL(18,2)) AS FundAccumulationUnit
+FROM DWT_FIA FA WITH (NOLOCK)
+INNER JOIN DWT_FUND_UNIT_PRICE FP WITH (NOLOCK)
+    ON FP.FND_ID = FA.FND_ID 
+    AND FA.FIA_EFF_DT = FP.FNDVL_EFF_DT
+WHERE FA.POL_ID = @PolicyID
+ORDER BY FA.FIA_EFF_DT DESC
+OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+OPTION (MAXDOP 2, RECOMPILE);";
+        }
+    }
+}
