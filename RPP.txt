@@ -1,0 +1,2 @@
+public string TotalPremiumsPaidIdr =>
+    string.Format(new System.Globalization.CultureInfo("id-ID"), "{0:C}", TotalPremiumsPaid);
