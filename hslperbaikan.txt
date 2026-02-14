@@ -1,0 +1,309 @@
+CREATE PROCEDURE usp_MigrateClientData_HighPerformance
+    @MaxDOP INT = 8,          -- Saat ini belum dipakai di OPTION (masih hard-coded 8)
+    @EnableDetailLog BIT = 0  -- Belum dipakai, disiapkan kalau mau logging detail
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+    
+    DECLARE @StartTime DATETIME = GETDATE();
+    DECLARE @StepTime  DATETIME;
+    DECLARE @ErrorMessage NVARCHAR(4000);
+    DECLARE @RowCounts TABLE
+    (
+        TableName NVARCHAR(100),
+        RowCount  INT,
+        Duration  INT   -- ms
+    );
+    
+    BEGIN TRY
+        ------------------------------------------------
+        -- PHASE 1: TRUNCATE ALL TABLES
+        ------------------------------------------------
+        PRINT 'Phase 1: Truncating tables...';
+        SET @StepTime = GETDATE();
+
+        -- Urutan: child -> parent (disesuaikan dari script Anda)
+        TRUNCATE TABLE SI_TFD_SF;
+        TRUNCATE TABLE SI_TFA_SF;
+        TRUNCATE TABLE SI_TCDSA_SF;
+        TRUNCATE TABLE SI_TFV_SF;
+        TRUNCATE TABLE SI_TUHCO_SF;
+        TRUNCATE TABLE SI_TPOLT_SF;
+        TRUNCATE TABLE SI_TPOLL_SF;
+        TRUNCATE TABLE SI_TCRCD_SF;
+        TRUNCATE TABLE SI_TCLNM_SF;
+        TRUNCATE TABLE SI_TCLIC_SF;
+        TRUNCATE TABLE SI_TCLIB_SF;
+        TRUNCATE TABLE SI_TCLIA_SF;
+        TRUNCATE TABLE SI_TCVG_SF;
+        TRUNCATE TABLE SI_TPOL_SF;
+        TRUNCATE TABLE SI_TCLI_SF;
+        
+        PRINT 'Truncate completed in ' 
+              + CAST(DATEDIFF(ms, @StepTime, GETDATE()) AS VARCHAR(20)) + ' ms';
+        
+        ------------------------------------------------
+        -- PHASE 2: BULK INSERT
+        ------------------------------------------------
+        PRINT 'Phase 2: Bulk inserting data...';
+
+        -- 1. SI_TCLI_SF (Client Master)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TCLI_SF WITH (TABLOCKX)
+        (CO_ID, CLI_ID, CLI_BTH_DT, CLI_ID_TYP_CD, CLI_ID_TXT)
+        SELECT CO_ID, CLI_ID, CLI_BTH_DT, CLI_ID_TYP_CD, CLI_ID_TXT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, CLI_ID, CLI_BTH_DT, CLI_ID_TYP_CD, CLI_ID_TXT 
+             FROM UDING602.TCLI WITH UR')
+        OPTION (MAXDOP 8, USE HINT('DISABLE_OPTIMIZER_ROWGOAL'), RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TCLI_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 2. SI_TCLIA_SF (Client Address)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TCLIA_SF WITH (TABLOCKX)
+        (CO_ID, POL_ID, CLI_ADDR_GR_CD, CLI_ADDR_TYP_CD, CLI_ADDR_SEQ_NUM, CLI_ADDR_CHNG_DT,
+         CLI_ADDR_LN_1_TXT, CLI_ADDR_LN_2_TXT, CLI_ADDR_LN_3_TXT, CLI_ADDR_LN_4_TXT, CLI_ADDR_LN_5_TXT)
+        SELECT CO_ID, POL_ID, CLI_ADDR_GR_CD, CLI_ADDR_TYP_CD, CLI_ADDR_SEQ_NUM, CLI_ADDR_CHNG_DT,
+               CLI_ADDR_LN_1_TXT, CLI_ADDR_LN_2_TXT, CLI_ADDR_LN_3_TXT, CLI_ADDR_LN_4_TXT, CLI_ADDR_LN_5_TXT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, CLI_ADDR_GR_CD, CLI_ADDR_TYP_CD, CLI_ADDR_SEQ_NUM, CLI_ADDR_CHNG_DT,
+                    CLI_ADDR_LN_1_TXT, CLI_ADDR_LN_2_TXT, CLI_ADDR_LN_3_TXT, CLI_ADDR_LN_4_TXT, CLI_ADDR_LN_5_TXT
+             FROM UDING602.TCLIA WITH UR')
+        OPTION (MAXDOP 8, USE HINT('DISABLE_OPTIMIZER_ROWGOAL'), RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TCLIA_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 3. SI_TCLIB_SF (Bank Account)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TCLIB_SF WITH (TABLOCKX)
+        (CO_ID, BNK_ID, BNK_BR_ID, BNK_ACCT_ID, CLI_ID, CLI_BNK_ACCT_NUM)
+        SELECT CO_ID, BNK_ID, BNK_BR_ID, BNK_ACCT_ID, CLI_ID, CLI_BNK_ACCT_NUM
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, BNK_ID, BNK_BR_ID, BNK_ACCT_ID, CLI_ID, CLI_BNK_ACCT_NUM 
+             FROM UDING602.TCLIB WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TCLIB_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 4. SI_TCLIC_SF (Contact)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TCLIC_SF WITH (TABLOCKX)
+        (CO_ID, CLI_ID, CLI_CNTCT_ID_CD, CLI_CNTCT_ID_TXT, CLI_CNTCT_ID_CTRY_NUM_CD, 
+         CLI_CNTCT_ID_AREA_CD, CLI_CTRY_CNTCT)
+        SELECT CO_ID, CLI_ID, CLI_CNTCT_ID_CD, CLI_CNTCT_ID_TXT, CLI_CNTCT_ID_CTRY_NUM_CD,
+               CLI_CNTCT_ID_AREA_CD, CLI_CTRY_CNTCT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, CLI_ID, CLI_CNTCT_ID_CD, CLI_CNTCT_ID_TXT, CLI_CNTCT_ID_CTRY_NUM_CD,
+                    CLI_CNTCT_ID_AREA_CD, CLI_CTRY_CNTCT 
+             FROM UDING602.TCLIC WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TCLIC_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 5. SI_TCLNM_SF (Individual Name)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TCLNM_SF WITH (TABLOCKX)
+        (CO_ID, CLI_ID, CLI_INDV_GR_CD, CLI_INDV_NM_TYP_CD, CLI_INDV_SEQ_NUM, PREV_UPDT_USER_ID,
+         PREV_UPDT_TS, GIV_NM_PHNT_NUM, SUR_NM_PHNT_NUM, ENTR_GIV_NM, ENTR_SUR_NM,
+         CLI_INDV_GIV_NM, CLI_INDV_MID_NM, CLI_INDV_SUR_NM, CLI_INDV_TITL_TXT, CLI_INDV_SFX_NM)
+        SELECT CO_ID, CLI_ID, CLI_INDV_GR_CD, CLI_INDV_NM_TYP_CD, CLI_INDV_SEQ_NUM, PREV_UPDT_USER_ID,
+               PREV_UPDT_TS, GIV_NM_PHNT_NUM, SUR_NM_PHNT_NUM, ENTR_GIV_NM, ENTR_SUR_NM,
+               CLI_INDV_GIV_NM, CLI_INDV_MID_NM, CLI_INDV_SUR_NM, CLI_INDV_TITL_TXT, CLI_INDV_SFX_NM
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, CLI_ID, CLI_INDV_GR_CD, CLI_INDV_NM_TYP_CD, CLI_INDV_SEQ_NUM, 
+                    PREV_UPDT_USER_ID, PREV_UPDT_TS, GIV_NM_PHNT_NUM, SUR_NM_PHNT_NUM, 
+                    ENTR_GIV_NM, ENTR_SUR_NM, CLI_INDV_GIV_NM, CLI_INDV_MID_NM, 
+                    CLI_INDV_SUR_NM, CLI_INDV_TITL_TXT, CLI_INDV_SFX_NM 
+             FROM UDING602.TCLNM WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TCLNM_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 6. SI_TCRCD_SF (Credit Card)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TCRCD_SF WITH (TABLOCKX)
+        (CO_ID, CRC_TYP_CD, CRC_ID, PREV_UPDT_USER_ID, PREV_UPDT_TS, 
+         CRC_XPRY_YR, CRC_XPRY_MO, CRC_HLDR_NM)
+        SELECT CO_ID, CRC_TYP_CD, CRC_ID, PREV_UPDT_USER_ID, PREV_UPDT_TS,
+               CRC_XPRY_YR, CRC_XPRY_MO, CRC_HLDR_NM
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, CRC_TYP_CD, CRC_ID, PREV_UPDT_USER_ID, PREV_UPDT_TS,
+                    CRC_XPRY_YR, CRC_XPRY_MO, CRC_HLDR_NM 
+             FROM UDING602.TCRCD WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TCRCD_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 7. SI_TPOL_SF (Policy)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TPOL_SF WITH (TABLOCKX)
+        (POL_ID, PLAN_ID, POL_ISS_EFF_DT, POL_CSTAT_CD, POL_CRCY_CD, POL_SNDRY_AMT,
+         POL_BILL_TO_DT_NUM, POL_BILL_TYP_CD, POL_TRU_PREM_AMT, POL_PD_TO_DT_NUM,
+         SERV_AGT_ID, SERV_AGT_ASIGN_DT, PREV_SERV_AGT_ID, SERV_BR_ID, POL_BILL_MODE_CD)
+        SELECT POL_ID, PLAN_ID, POL_ISS_EFF_DT, POL_CSTAT_CD, POL_CRCY_CD, POL_SNDRY_AMT,
+               POL_BILL_TO_DT_NUM, POL_BILL_TYP_CD, POL_TRU_PREM_AMT, POL_PD_TO_DT_NUM,
+               SERV_AGT_ID, SERV_AGT_ASIGN_DT, PREV_SERV_AGT_ID, SERV_BR_ID, POL_BILL_MODE_CD
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT POL_ID, PLAN_ID, POL_ISS_EFF_DT, POL_CSTAT_CD, POL_CRCY_CD, POL_SNDRY_AMT,
+                    POL_BILL_TO_DT_NUM, POL_BILL_TYP_CD, POL_TRU_PREM_AMT, POL_PD_TO_DT_NUM,
+                    SERV_AGT_ID, SERV_AGT_ASIGN_DT, PREV_SERV_AGT_ID, SERV_BR_ID, POL_BILL_MODE_CD 
+             FROM UDING602.TPOL WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TPOL_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 8. SI_TCVG_SF (Coverage)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TCVG_SF WITH (TABLOCKX)
+        (CO_ID, POL_ID, CVG_NUM, CVG_SEX_CD, COMIT_PERI_END_DT, PLAN_ID,
+         CVG_FACE_AMT, CVG_RT_AGE, CVG_CSTAT_CD, CVG_MAT_XPRY_DT)
+        SELECT CO_ID, POL_ID, CVG_NUM, CVG_SEX_CD, COMIT_PERI_END_DT, PLAN_ID,
+               CVG_FACE_AMT, CVG_RT_AGE, CVG_CSTAT_CD, CVG_MAT_XPRY_DT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, CVG_NUM, CVG_SEX_CD, COMIT_PERI_END_DT, PLAN_ID,
+                    CVG_FACE_AMT, CVG_RT_AGE, CVG_CSTAT_CD, CVG_MAT_XPRY_DT 
+             FROM UDING602.TCVG WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TCVG_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 9. SI_TPOLL_SF (Policy Loan)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TPOLL_SF WITH (TABLOCKX)
+        (CO_ID, POL_ID, POL_LOAN_ID, LOAN_AMT, LOAN_INT_YTD_AMT, LOAN_AVB_AMT)
+        SELECT CO_ID, POL_ID, POL_LOAN_ID, LOAN_AMT, LOAN_INT_YTD_AMT, LOAN_AVB_AMT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, POL_LOAN_ID, LOAN_AMT, LOAN_INT_YTD_AMT, LOAN_AVB_AMT 
+             FROM UDING602.TPOLL WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TPOLL_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 10. SI_TPOLT_SF (Policy Tax)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TPOLT_SF WITH (TABLOCKX)
+        (CO_ID, POL_ID, TAXBL_PREM_PD_AMT)
+        SELECT CO_ID, POL_ID, TAXBL_PREM_PD_AMT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, TAXBL_PREM_PD_AMT 
+             FROM UDING602.TPOLT WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TPOLT_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 11. SI_TFA_SF (Financial Activity)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TFA_SF WITH (TABLOCKX)
+        (CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM, CIA_EFF_DT, CIA_TYP_CD,
+         CIA_CLI_TRXN_AMT, CIA_FND_TRXN_AMT, CIA_LOAD_AMT, CIA_REVRS_PRCES_DT)
+        SELECT CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM, CIA_EFF_DT, CIA_TYP_CD,
+               CIA_CLI_TRXN_AMT, CIA_FND_TRXN_AMT, CIA_LOAD_AMT, CIA_REVRS_PRCES_DT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM, CIA_EFF_DT, CIA_TYP_CD,
+                    CIA_CLI_TRXN_AMT, CIA_FND_TRXN_AMT, CIA_LOAD_AMT, CIA_REVRS_PRCES_DT 
+             FROM UDING602.TFA WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TFA_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 12. SI_TFD_SF (Fund Distribution)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TFD_SF WITH (TABLOCKX)
+        (CO_ID, POL_ID, CVG_NUM, FND_ID, FIA_IDT_NUM, FIA_SEQ_NUM, FIA_AUNIT_PRIC_AMT,
+         CFN_INTG_AUNIT_QTY, PURCH_PRIC_1_AMT, FIA_INTG_AUNIT_QTY)
+        SELECT CO_ID, POL_ID, CVG_NUM, FND_ID, FIA_IDT_NUM, FIA_SEQ_NUM, FIA_AUNIT_PRIC_AMT,
+               CFN_INTG_AUNIT_QTY, PURCH_PRIC_1_AMT, FIA_INTG_AUNIT_QTY
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, CVG_NUM, FND_ID, FIA_IDT_NUM, FIA_SEQ_NUM, FIA_AUNIT_PRIC_AMT,
+                    CFN_INTG_AUNIT_QTY, PURCH_PRIC_1_AMT, FIA_INTG_AUNIT_QTY 
+             FROM UDING602.TFD WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TFD_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 13. SI_TCDSA_SF (Credit Debit)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TCDSA_SF WITH (TABLOCKX)
+        (CO_ID, POL_ID, CDA_TYP_CD, POL_PAYO_NUM, CDA_SEQ_NUM, CDA_EFF_IDT_NUM, CDA_TOT_TRXN_AMT)
+        SELECT CO_ID, POL_ID, CDA_TYP_CD, POL_PAYO_NUM, CDA_SEQ_NUM, CDA_EFF_IDT_NUM, CDA_TOT_TRXN_AMT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, CDA_TYP_CD, POL_PAYO_NUM, CDA_SEQ_NUM, CDA_EFF_IDT_NUM, CDA_TOT_TRXN_AMT 
+             FROM UDING602.TCDSA WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TCDSA_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 14. SI_TFV_SF (Fund Value)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TFV_SF WITH (TABLOCKX)
+        (CO_ID, FND_ID, FNDVL_IDT_NUM, PURCH_PRIC_1_AMT)
+        SELECT CO_ID, FND_ID, FNDVL_IDT_NUM, PURCH_PRIC_1_AMT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, FND_ID, FNDVL_IDT_NUM, PURCH_PRIC_1_AMT 
+             FROM UDING602.TFV WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TFV_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        -- 15. SI_TUHCO_SF (Unit History Coverage)
+        SET @StepTime = GETDATE();
+        INSERT INTO SI_TUHCO_SF WITH (TABLOCKX)
+        (CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM, CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT,
+         CVG_GUAR_COI_AMT, STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+         CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT)
+        SELECT CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM, CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT,
+               CVG_GUAR_COI_AMT, STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+               CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM, CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT,
+                    CVG_GUAR_COI_AMT, STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+                    CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT 
+             FROM UDING602.TUHCO WITH UR')
+        OPTION (MAXDOP 8, RECOMPILE);
+        INSERT INTO @RowCounts 
+        VALUES ('SI_TUHCO_SF', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        ------------------------------------------------
+        -- SUMMARY REPORT
+        ------------------------------------------------
+        DECLARE @TotalDuration INT = DATEDIFF(SECOND, @StartTime, GETDATE());
+        DECLARE @TotalRows     INT = (SELECT SUM(RowCount) FROM @RowCounts);
+        
+        PRINT '';
+        PRINT '========================================';
+        PRINT 'MIGRATION COMPLETED SUCCESSFULLY!';
+        PRINT '========================================';
+        PRINT 'Total Duration: ' + CAST(@TotalDuration AS VARCHAR(10)) + ' seconds';
+        PRINT 'Total Rows: '    + CAST(@TotalRows AS VARCHAR(20));
+        PRINT 'Average Speed: ' 
+              + CAST(@TotalRows / NULLIF(@TotalDuration, 0) AS VARCHAR(20)) + ' rows/sec';
+        PRINT '';
+        PRINT 'Details per table:';
+        PRINT '----------------------------------------';
+        
+        SELECT 
+            TableName,
+            FORMAT(RowCount, 'N0') AS [Rows Inserted],
+            CAST(Duration AS VARCHAR(10)) + ' ms' AS [Duration],
+            FORMAT(RowCount * 1000.0 / NULLIF(Duration, 0), 'N0') AS [Rows/Sec]
+        FROM @RowCounts
+        ORDER BY Duration DESC;
+        
+        IF @TotalDuration > 15
+            PRINT 'WARNING: Target 15s exceeded! Consider further optimization.';
+        ELSE
+            PRINT 'SUCCESS: Target 15s achieved!';
+        
+    END TRY
+    BEGIN CATCH
+        SET @ErrorMessage = ERROR_MESSAGE();
+        PRINT 'ERROR: ' + @ErrorMessage;
+        RAISERROR('Migration failed: %s', 16, 1, @ErrorMessage);
+        -- Atau bisa diganti:
+        -- THROW;
+    END CATCH
+END
+GO
