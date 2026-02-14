@@ -1,0 +1,166 @@
+CREATE PROCEDURE usp_MigrateCashAllocation_HighPerformance
+    @MaxDOP INT = 8
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+    DECLARE @StartTime DATETIME = GETDATE();
+    DECLARE @StepTime  DATETIME;
+    DECLARE @ErrorMessage NVARCHAR(4000);
+    DECLARE @RowCounts TABLE (Phase NVARCHAR(50), RowCount INT, Duration INT);
+
+    BEGIN TRY
+        ------------------------------------------------
+        -- 1. TRUNCATE & BULK LOAD STAGING SI_TCDSA_SF
+        ------------------------------------------------
+        PRINT 'Phase 1: Refresh staging SI_TCDSA_SF...';
+        SET @StepTime = GETDATE();
+
+        TRUNCATE TABLE SI_TCDSA_SF;
+
+        INSERT INTO SI_TCDSA_SF WITH (TABLOCKX)
+        (
+            CO_ID,
+            POL_ID,
+            CDA_TYP_CD,
+            POL_PAYO_NUM,
+            CDA_SEQ_NUM,
+            CDA_EFF_IDT_NUM,
+            CDA_TOT_TRXN_AMT
+        )
+        SELECT
+            CO_ID,
+            POL_ID,
+            CDA_TYP_CD,
+            POL_PAYO_NUM,
+            CDA_SEQ_NUM,
+            CDA_EFF_IDT_NUM,
+            CDA_TOT_TRXN_AMT
+        FROM OPENQUERY([UDING602_SV80621], 
+            'SELECT CO_ID, POL_ID, CDA_TYP_CD, POL_PAYO_NUM, CDA_SEQ_NUM, CDA_EFF_IDT_NUM, CDA_TOT_TRXN_AMT 
+             FROM UDING602.TCDSA WITH UR')
+        OPTION (MAXDOP 8, USE HINT('DISABLE_OPTIMIZER_ROWGOAL'), RECOMPILE);
+
+        INSERT INTO @RowCounts 
+        VALUES ('Staging Load', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        PRINT 'Staging SI_TCDSA_SF loaded: ' + CAST(@@ROWCOUNT AS VARCHAR(20)) + ' rows in '
+              + CAST(DATEDIFF(ms, @StepTime, GETDATE()) AS VARCHAR(20)) + ' ms';
+
+        ------------------------------------------------
+        -- 2. BULK UPDATE FACT DWT_CASH_ALLOCATION_SF
+        ------------------------------------------------
+        PRINT 'Phase 2: Updating DWT_CASH_ALLOCATION_SF from SI_TCDSA_SF...';
+        SET @StepTime = GETDATE();
+
+        -- Asumsi key = (CO_ID, POL_ID, CDA_TYP_CD, POL_PAYO_NUM, CDA_SEQ_NUM, CDA_EFF_IDT_NUM)
+        UPDATE  F WITH (TABLOCK)
+        SET
+            F.CDA_TOT_TRXN_AMT = S.CDA_TOT_TRXN_AMT
+            -- Tambah mapping kolom lain bila ada di fact
+        FROM DWT_CASH_ALLOCATION_SF AS F
+        INNER JOIN SI_TCDSA_SF AS S
+            ON  F.CO_ID          = S.CO_ID
+            AND F.POL_ID         = S.POL_ID
+            AND F.CDA_TYP_CD     = S.CDA_TYP_CD
+            AND F.POL_PAYO_NUM   = S.POL_PAYO_NUM
+            AND F.CDA_SEQ_NUM    = S.CDA_SEQ_NUM
+            AND F.CDA_EFF_IDT_NUM= S.CDA_EFF_IDT_NUM
+        OPTION (MAXDOP 8, RECOMPILE);
+
+        INSERT INTO @RowCounts 
+        VALUES ('Update Fact', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        PRINT 'Update completed: ' + CAST(@@ROWCOUNT AS VARCHAR(20)) + ' rows in '
+              + CAST(DATEDIFF(ms, @StepTime, GETDATE()) AS VARCHAR(20)) + ' ms';
+
+        ------------------------------------------------
+        -- 3. BULK INSERT FACT BARU
+        ------------------------------------------------
+        PRINT 'Phase 3: Insert new cash allocations into DWT_CASH_ALLOCATION_SF...';
+        SET @StepTime = GETDATE();
+
+        INSERT INTO DWT_CASH_ALLOCATION_SF WITH (TABLOCKX)
+        (
+            CO_ID,
+            POL_ID,
+            CDA_TYP_CD,
+            POL_PAYO_NUM,
+            CDA_SEQ_NUM,
+            CDA_EFF_IDT_NUM,
+            CDA_TOT_TRXN_AMT
+        )
+        SELECT
+            S.CO_ID,
+            S.POL_ID,
+            S.CDA_TYP_CD,
+            S.POL_PAYO_NUM,
+            S.CDA_SEQ_NUM,
+            S.CDA_EFF_IDT_NUM,
+            S.CDA_TOT_TRXN_AMT
+        FROM SI_TCDSA_SF AS S
+        WHERE NOT EXISTS (
+            SELECT 1 
+            FROM DWT_CASH_ALLOCATION_SF AS F
+            WHERE F.CO_ID          = S.CO_ID
+              AND F.POL_ID         = S.POL_ID
+              AND F.CDA_TYP_CD     = S.CDA_TYP_CD
+              AND F.POL_PAYO_NUM   = S.POL_PAYO_NUM
+              AND F.CDA_SEQ_NUM    = S.CDA_SEQ_NUM
+              AND F.CDA_EFF_IDT_NUM= S.CDA_EFF_IDT_NUM
+        )
+        OPTION (MAXDOP 8, RECOMPILE);
+
+        INSERT INTO @RowCounts 
+        VALUES ('Insert Fact', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        PRINT 'Insert completed: ' + CAST(@@ROWCOUNT AS VARCHAR(20)) + ' rows in '
+              + CAST(DATEDIFF(ms, @StepTime, GETDATE()) AS VARCHAR(20)) + ' ms';
+
+        ------------------------------------------------
+        -- 4. PERFORMANCE SUMMARY
+        ------------------------------------------------
+        DECLARE @TotalDuration INT = DATEDIFF(ms, @StartTime, GETDATE());
+        DECLARE @TotalRows INT = (SELECT SUM(RowCount) FROM @RowCounts);
+
+        PRINT '';
+        PRINT '========================================';
+        PRINT 'usp_MigrateCashAllocation_HighPerformance';
+        PRINT '========================================';
+        PRINT 'Total Duration: ' + CAST(@TotalDuration AS VARCHAR(10)) + ' ms (' 
+              + CAST(@TotalDuration/1000.0 AS VARCHAR(10)) + ' seconds)';
+        PRINT 'Total Rows Processed: ' + CAST(@TotalRows AS VARCHAR(20));
+        
+        IF @TotalRows > 0
+            PRINT 'Average Speed: ' 
+                + CAST(@TotalRows * 1000.0 / NULLIF(@TotalDuration, 0) AS VARCHAR(20)) + ' rows/sec';
+        
+        PRINT '';
+        PRINT 'Details per phase:';
+        PRINT '----------------------------------------';
+        
+        SELECT 
+            Phase,
+            RowCount AS [Rows],
+            Duration AS [Duration (ms)],
+            CAST(RowCount * 1000.0 / NULLIF(Duration, 0) AS INT) AS [Rows/Sec]
+        FROM @RowCounts
+        ORDER BY Duration DESC;
+
+        PRINT '';
+        IF @TotalDuration > 15000
+            PRINT 'WARNING: Target 15s exceeded! Duration: ' + CAST(@TotalDuration/1000.0 AS VARCHAR(10)) + 's';
+        ELSE
+            PRINT 'SUCCESS: Target 15s achieved! Duration: ' + CAST(@TotalDuration/1000.0 AS VARCHAR(10)) + 's';
+
+    END TRY
+    BEGIN CATCH
+        SET @ErrorMessage = ERROR_MESSAGE();
+        PRINT 'ERROR: ' + @ErrorMessage;
+        PRINT 'Error Line: ' + CAST(ERROR_LINE() AS VARCHAR(10));
+        THROW;
+    END CATCH
+END
+GO
