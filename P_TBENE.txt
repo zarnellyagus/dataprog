@@ -1,0 +1,185 @@
+CREATE PROCEDURE usp_MigratePolicyBeneficiary_HighPerformance
+    @MaxDOP INT = 8
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+    DECLARE @StartTime  DATETIME = GETDATE();
+    DECLARE @StepTime   DATETIME;
+    DECLARE @ErrorMsg   NVARCHAR(4000);
+    DECLARE @RowCounts TABLE (Phase NVARCHAR(50), RowCount INT, DurationMs INT);
+
+    BEGIN TRY
+        ------------------------------------------------
+        -- PHASE 1: TRUNCATE + BULK LOAD SI_TBENE_SF
+        ------------------------------------------------
+        PRINT 'Phase 1: TRUNCATE & BULK LOAD SI_TBENE_SF...';
+        SET @StepTime = GETDATE();
+
+        TRUNCATE TABLE SI_TBENE_SF;
+
+        INSERT INTO SI_TBENE_SF WITH (TABLOCKX)
+        (
+            CO_ID,
+            POL_ID,
+            BNFY_SEQ_NUM,
+            BNFY_NM,
+            BNFY_PRCDS_PCT,
+            BNFY_BTH_DT,
+            BNFY_REL_INSRD_CD,
+            TRST_NM,
+            BNFY_REL_TRST_CD,
+            PREV_UPDT_USER_ID,
+            PREV_UPDT_TS
+        )
+        SELECT
+            CO_ID,
+            POL_ID,
+            BNFY_SEQ_NUM,
+            BNFY_NM,
+            BNFY_PRCDS_PCT,        
+            BNFY_BTH_DT,
+            BNFY_REL_INSRD_CD,
+            TRST_NM,
+            BNFY_REL_TRST_CD,
+            PREV_UPDT_USER_ID,
+            PREV_UPDT_TS
+        FROM OPENQUERY([UDING602_SV80621],
+            'SELECT CO_ID,
+                    POL_ID,
+                    BNFY_SEQ_NUM,
+                    BNFY_NM,
+                    BNFY_PRCDS_PCT,
+                    BNFY_BTH_DT,
+                    BNFY_REL_INSRD_CD,
+                    TRST_NM,
+                    BNFY_REL_TRST_CD,
+                    PREV_UPDT_USER_ID,
+                    PREV_UPDT_TS
+             FROM UDING602.TBENE WITH UR')
+        OPTION (
+            MAXDOP 8,
+            USE HINT('DISABLE_OPTIMIZER_ROWGOAL'),
+            RECOMPILE
+        );
+
+        INSERT INTO @RowCounts
+        VALUES ('Staging Load', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        PRINT 'Phase 1 done: ' + CAST(@@ROWCOUNT AS VARCHAR(20)) 
+              + ' rows loaded into SI_TBENE_SF';
+
+        ------------------------------------------------
+        -- PHASE 2: UPDATE DWA_POLICY_BENEFICIARY_SF (HANYA YG BERUBAH)
+        ------------------------------------------------
+        PRINT 'Phase 2: UPDATE DWA_POLICY_BENEFICIARY_SF...';
+        SET @StepTime = GETDATE();
+
+        UPDATE  D WITH (TABLOCK)
+        SET
+            D.BNFY_NM           = S.BNFY_NM,
+            D.BNFY_PRCDS_PCT    = S.BNFY_PRCDS_PCT,
+            D.BNFY_BTH_DT       = S.BNFY_BTH_DT,
+            D.BNFY_REL_INSRD_CD = S.BNFY_REL_INSRD_CD,
+            D.TRST_NM           = S.TRST_NM,
+            D.BNFY_REL_TRST_CD  = S.BNFY_REL_TRST_CD,
+            D.PREV_UPDT_USER_ID = S.PREV_UPDT_USER_ID,
+            D.PREV_UPDT_TS      = S.PREV_UPDT_TS
+        FROM DWA_POLICY_BENEFICIARY_SF AS D
+        INNER JOIN SI_TBENE_SF AS S
+            ON  D.CO_ID        = S.CO_ID
+            AND D.POL_ID       = S.POL_ID
+            AND D.BNFY_SEQ_NUM = S.BNFY_SEQ_NUM
+        WHERE
+            ISNULL(D.BNFY_NM,           '')          <> ISNULL(S.BNFY_NM,           '') OR
+            ISNULL(D.BNFY_PRCDS_PCT,    0)           <> ISNULL(S.BNFY_PRCDS_PCT,    0)  OR
+            ISNULL(D.BNFY_BTH_DT,       '19000101')  <> ISNULL(S.BNFY_BTH_DT,       '19000101') OR
+            ISNULL(D.BNFY_REL_INSRD_CD, '')          <> ISNULL(S.BNFY_REL_INSRD_CD, '') OR
+            ISNULL(D.TRST_NM,           '')          <> ISNULL(S.TRST_NM,           '') OR
+            ISNULL(D.BNFY_REL_TRST_CD,  '')          <> ISNULL(S.BNFY_REL_TRST_CD,  '') OR
+            ISNULL(D.PREV_UPDT_USER_ID, '')          <> ISNULL(S.PREV_UPDT_USER_ID, '') OR
+            ISNULL(D.PREV_UPDT_TS,      '19000101')  <> ISNULL(S.PREV_UPDT_TS,      '19000101')
+        OPTION (MAXDOP 8, RECOMPILE);
+
+        INSERT INTO @RowCounts
+        VALUES ('Update DWA', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        PRINT 'Phase 2 done: ' + CAST(@@ROWCOUNT AS VARCHAR(20)) 
+              + ' rows updated in DWA_POLICY_BENEFICIARY_SF';
+
+        ------------------------------------------------
+        -- PHASE 3: INSERT BENEFICIARY BARU
+        ------------------------------------------------
+        PRINT 'Phase 3: INSERT new beneficiaries into DWA_POLICY_BENEFICIARY_SF...';
+        SET @StepTime = GETDATE();
+
+        INSERT INTO DWA_POLICY_BENEFICIARY_SF WITH (TABLOCKX)
+        (
+            CO_ID,
+            POL_ID,
+            BNFY_SEQ_NUM,
+            BNFY_NM,
+            BNFY_PRCDS_PCT,
+            BNFY_BTH_DT,
+            BNFY_REL_INSRD_CD,
+            TRST_NM,
+            BNFY_REL_TRST_CD,
+            PREV_UPDT_USER_ID,
+            PREV_UPDT_TS
+        )
+        SELECT
+            S.CO_ID,
+            S.POL_ID,
+            S.BNFY_SEQ_NUM,
+            S.BNFY_NM,
+            S.BNFY_PRCDS_PCT,
+            S.BNFY_BTH_DT,
+            S.BNFY_REL_INSRD_CD,
+            S.TRST_NM,
+            S.BNFY_REL_TRST_CD,
+            S.PREV_UPDT_USER_ID,
+            S.PREV_UPDT_TS
+        FROM SI_TBENE_SF AS S
+        LEFT JOIN DWA_POLICY_BENEFICIARY_SF AS D
+            ON  D.CO_ID        = S.CO_ID
+            AND D.POL_ID       = S.POL_ID
+            AND D.BNFY_SEQ_NUM = S.BNFY_SEQ_NUM
+        WHERE D.CO_ID IS NULL
+        OPTION (MAXDOP 8, RECOMPILE);
+
+        INSERT INTO @RowCounts
+        VALUES ('Insert DWA', @@ROWCOUNT, DATEDIFF(ms, @StepTime, GETDATE()));
+
+        PRINT 'Phase 3 done: ' + CAST(@@ROWCOUNT AS VARCHAR(20)) 
+              + ' new rows inserted into DWA_POLICY_BENEFICIARY_SF';
+
+        ------------------------------------------------
+        -- SUMMARY
+        ------------------------------------------------
+        DECLARE @TotalMs   INT = DATEDIFF(ms, @StartTime, GETDATE());
+        DECLARE @TotalRows INT = (SELECT SUM(RowCount) FROM @RowCounts);
+
+        PRINT '';
+        PRINT '========================================';
+        PRINT 'usp_MigratePolicyBeneficiary_HighPerformance SUMMARY';
+        PRINT 'Total Duration: ' + CAST(@TotalMs AS VARCHAR(10)) + ' ms (' 
+              + CAST(@TotalMs / 1000.0 AS VARCHAR(10)) + ' seconds)';
+        PRINT 'Total Rows Processed: ' + CAST(@TotalRows AS VARCHAR(20));
+        PRINT '========================================';
+
+        IF @TotalMs > 15000
+            PRINT 'WARNING: Target < 15s TIDAK tercapai!';
+        ELSE
+            PRINT 'SUCCESS: Target < 15s TERCAPAI!';
+
+    END TRY
+    BEGIN CATCH
+        SET @ErrorMsg = ERROR_MESSAGE();
+        PRINT 'ERROR: ' + @ErrorMsg;
+        PRINT 'Error Line: ' + CAST(ERROR_LINE() AS VARCHAR(10));
+        THROW;
+    END CATCH
+END
+GO
